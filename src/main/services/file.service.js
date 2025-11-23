@@ -194,6 +194,123 @@ class FileService {
   }
 
   /**
+   * 扫描文件夹获取视频文件（仅一级目录）
+   * @param {string} folderPath - 文件夹路径
+   * @returns {Promise<Array>} 视频文件列表
+   */
+  async scanFolderShallow(folderPath) {
+    try {
+      // 检查文件夹是否存在
+      const exists = await fs.pathExists(folderPath)
+      if (!exists) {
+        throw new Error(`文件夹不存在: ${folderPath}`)
+      }
+
+      const videoExtensions = ['mp4', 'avi', 'mov', 'mkv', 'flv', 'wmv', 'webm', 'm4v']
+
+      // 读取目录内容，仅一级
+      const items = await fs.readdir(folderPath, { withFileTypes: true })
+
+      const videoFiles = []
+
+      for (const item of items) {
+        // 只处理文件，不处理目录
+        if (item.isFile()) {
+          const ext = path.extname(item.name).toLowerCase().substring(1)
+
+          // 检查是否为视频文件
+          if (videoExtensions.includes(ext)) {
+            const filePath = path.join(folderPath, item.name)
+            try {
+              const stats = await fs.stat(filePath)
+              videoFiles.push({
+                id: this.generateFileId(filePath),
+                path: filePath,
+                name: item.name,
+                size: stats.size,
+                sizeFormatted: this.formatFileSize(stats.size),
+                extension: path.extname(item.name).toLowerCase(),
+                modifiedTime: stats.mtime,
+                folder: folderPath
+              })
+            } catch (error) {
+              console.error(`Error processing file ${filePath}:`, error)
+            }
+          }
+        }
+      }
+
+      console.log(`Found ${videoFiles.length} video files in ${folderPath} (shallow scan)`)
+      return videoFiles
+    } catch (error) {
+      console.error('Error scanning folder (shallow):', error)
+      throw error
+    }
+  }
+
+  /**
+   * 移动视频文件到"已发"文件夹
+   * @param {string} folderPath - 账号文件夹路径
+   * @returns {Promise<Object>} 移动结果
+   */
+  async moveToPublishedFolder(folderPath) {
+    try {
+      // 获取一级目录下的所有视频文件
+      const videoFiles = await this.scanFolderShallow(folderPath)
+
+      if (videoFiles.length === 0) {
+        return {
+          success: true,
+          message: '没有找到需要移动的视频文件',
+          movedCount: 0
+        }
+      }
+
+      // 创建"已发"文件夹
+      const publishedFolder = path.join(folderPath, '已发')
+      await fs.ensureDir(publishedFolder)
+
+      let movedCount = 0
+      const errors = []
+
+      // 移动所有视频文件
+      for (const file of videoFiles) {
+        try {
+          const fileName = path.basename(file.path)
+          const destPath = path.join(publishedFolder, fileName)
+
+          // 如果目标文件已存在，添加时间戳避免覆盖
+          let finalDestPath = destPath
+          if (await fs.pathExists(destPath)) {
+            const timestamp = Date.now()
+            const ext = path.extname(fileName)
+            const nameWithoutExt = path.basename(fileName, ext)
+            finalDestPath = path.join(publishedFolder, `${nameWithoutExt}_${timestamp}${ext}`)
+          }
+
+          await fs.move(file.path, finalDestPath)
+          movedCount++
+          console.log(`Moved: ${file.path} -> ${finalDestPath}`)
+        } catch (error) {
+          console.error(`Failed to move ${file.path}:`, error)
+          errors.push({ file: file.name, error: error.message })
+        }
+      }
+
+      return {
+        success: errors.length === 0,
+        message: `成功移动 ${movedCount} 个视频文件到"已发"文件夹`,
+        movedCount,
+        totalCount: videoFiles.length,
+        errors
+      }
+    } catch (error) {
+      console.error('Error moving to published folder:', error)
+      throw error
+    }
+  }
+
+  /**
    * 关闭所有文件监听器
    */
   closeAll() {

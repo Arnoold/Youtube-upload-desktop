@@ -23,6 +23,24 @@ function setupIPC(mainWindow, services) {
     }
   })
 
+  ipcMain.handle('file:scan-shallow', async (event, folderPath) => {
+    try {
+      return await fileService.scanFolderShallow(folderPath)
+    } catch (error) {
+      console.error('file:scan-shallow error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('file:move-to-published', async (event, folderPath) => {
+    try {
+      return await fileService.moveToPublishedFolder(folderPath)
+    } catch (error) {
+      console.error('file:move-to-published error:', error)
+      throw error
+    }
+  })
+
   // ===== 比特浏览器相关 =====
 
   ipcMain.handle('browser:test', async () => {

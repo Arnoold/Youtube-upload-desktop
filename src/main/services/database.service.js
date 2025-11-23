@@ -60,6 +60,7 @@ class DatabaseService {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
         bit_browser_id TEXT,
+        folder_path TEXT,
         channel_id TEXT,
         channel_name TEXT,
         youtube_email TEXT,
@@ -68,6 +69,18 @@ class DatabaseService {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `)
+
+    // 迁移：为已存在的表添加 folder_path 列
+    try {
+      const columns = this.db.pragma('table_info(browser_profiles)')
+      const hasFolderPath = columns.some(col => col.name === 'folder_path')
+      if (!hasFolderPath) {
+        this.db.exec('ALTER TABLE browser_profiles ADD COLUMN folder_path TEXT')
+        console.log('Added folder_path column to browser_profiles table')
+      }
+    } catch (error) {
+      console.error('Error checking/adding folder_path column:', error)
+    }
 
     // 创建设置表
     this.db.exec(`
@@ -148,13 +161,14 @@ class DatabaseService {
   createBrowserProfile(profile) {
     const stmt = this.db.prepare(`
       INSERT INTO browser_profiles (
-        name, bit_browser_id, channel_id, channel_name, youtube_email
-      ) VALUES (?, ?, ?, ?, ?)
+        name, bit_browser_id, folder_path, channel_id, channel_name, youtube_email
+      ) VALUES (?, ?, ?, ?, ?, ?)
     `)
 
     const info = stmt.run(
       profile.name,
       profile.bitBrowserId || null,
+      profile.folderPath || null,
       profile.channelId || null,
       profile.channelName || null,
       profile.youtubeEmail || null
