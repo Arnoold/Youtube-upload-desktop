@@ -1,4 +1,4 @@
-const { ipcMain } = require('electron')
+const { ipcMain, dialog } = require('electron')
 
 function setupIPC(mainWindow, services) {
   const { dbService, fileService, bitBrowserService, uploadService } = services
@@ -110,6 +110,24 @@ function setupIPC(mainWindow, services) {
     }
   })
 
+  ipcMain.handle('db:update-browser-profile', async (event, id, updates) => {
+    try {
+      return dbService.updateBrowserProfile(id, updates)
+    } catch (error) {
+      console.error('db:update-browser-profile error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('db:delete-browser-profile', async (event, id) => {
+    try {
+      return dbService.deleteBrowserProfile(id)
+    } catch (error) {
+      console.error('db:delete-browser-profile error:', error)
+      throw error
+    }
+  })
+
   ipcMain.handle('db:get-setting', async (event, key) => {
     try {
       return dbService.getSetting(key)
@@ -124,6 +142,19 @@ function setupIPC(mainWindow, services) {
       return dbService.setSetting(key, value)
     } catch (error) {
       console.error('db:set-setting error:', error)
+      throw error
+    }
+  })
+
+  // ===== 对话框相关 =====
+
+  ipcMain.handle('dialog:select-folder', async () => {
+    try {
+      return await dialog.showOpenDialog(mainWindow, {
+        properties: ['openDirectory']
+      })
+    } catch (error) {
+      console.error('dialog:select-folder error:', error)
       throw error
     }
   })

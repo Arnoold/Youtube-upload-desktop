@@ -78,7 +78,39 @@ class DatabaseService {
       )
     `)
 
+    // 迁移：为 browser_profiles 表添加新字段
+    this.migrateBrowserProfiles()
+
     console.log('Database tables created/verified')
+  }
+
+  migrateBrowserProfiles() {
+    const columns = this.db.pragma('table_info(browser_profiles)')
+    const columnNames = columns.map(col => col.name)
+
+    // 添加 folder_path 字段
+    if (!columnNames.includes('folder_path')) {
+      this.db.exec('ALTER TABLE browser_profiles ADD COLUMN folder_path TEXT')
+      console.log('Added folder_path column to browser_profiles')
+    }
+
+    // 添加 default_timezone 字段
+    if (!columnNames.includes('default_timezone')) {
+      this.db.exec("ALTER TABLE browser_profiles ADD COLUMN default_timezone TEXT DEFAULT 'Asia/Shanghai'")
+      console.log('Added default_timezone column to browser_profiles')
+    }
+
+    // 添加 default_description 字段
+    if (!columnNames.includes('default_description')) {
+      this.db.exec('ALTER TABLE browser_profiles ADD COLUMN default_description TEXT')
+      console.log('Added default_description column to browser_profiles')
+    }
+
+    // 添加 default_tags 字段
+    if (!columnNames.includes('default_tags')) {
+      this.db.exec('ALTER TABLE browser_profiles ADD COLUMN default_tags TEXT')
+      console.log('Added default_tags column to browser_profiles')
+    }
   }
 
   // ===== 上传任务相关方法 =====
@@ -148,8 +180,9 @@ class DatabaseService {
   createBrowserProfile(profile) {
     const stmt = this.db.prepare(`
       INSERT INTO browser_profiles (
-        name, bit_browser_id, channel_id, channel_name, youtube_email
-      ) VALUES (?, ?, ?, ?, ?)
+        name, bit_browser_id, channel_id, channel_name, youtube_email,
+        folder_path, default_timezone, default_description, default_tags
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
 
     const info = stmt.run(
@@ -157,7 +190,11 @@ class DatabaseService {
       profile.bitBrowserId || null,
       profile.channelId || null,
       profile.channelName || null,
-      profile.youtubeEmail || null
+      profile.youtubeEmail || null,
+      profile.folderPath || null,
+      profile.defaultTimezone || 'Asia/Shanghai',
+      profile.defaultDescription || null,
+      profile.defaultTags || null
     )
 
     return info.lastInsertRowid
