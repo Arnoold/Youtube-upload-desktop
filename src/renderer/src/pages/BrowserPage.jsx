@@ -41,6 +41,10 @@ const BrowserPage = () => {
       const browserListResult = await window.electron.browser.list()
       const isBitBrowserRunning = browserListResult.success
 
+      // 调试：打印完整的API响应
+      console.log('=== 比特浏览器API完整响应 ===')
+      console.log('browserListResult:', JSON.stringify(browserListResult, null, 2))
+
       // 获取比特浏览器中所有配置的状态
       const bitBrowserProfiles = browserListResult.data?.list || []
 

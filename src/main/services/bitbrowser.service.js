@@ -21,7 +21,11 @@ class BitBrowserService {
    */
   async testConnection() {
     try {
-      const response = await axios.post(`${this.apiUrl}/browser/list`, {}, {
+      // 比特浏览器API需要分页参数
+      const response = await axios.post(`${this.apiUrl}/browser/list`, {
+        page: 0,
+        pageSize: 10
+      }, {
         timeout: 5000
       })
       console.log('BitBrowser connection test successful')
@@ -48,7 +52,11 @@ class BitBrowserService {
    */
   async getProfiles() {
     try {
-      const response = await axios.post(`${this.apiUrl}/browser/list`, {})
+      // 比特浏览器API需要分页参数
+      const response = await axios.post(`${this.apiUrl}/browser/list`, {
+        page: 0,
+        pageSize: 100
+      })
       console.log(`Retrieved ${response.data.data?.list?.length || 0} browser profiles`)
       return response.data
     } catch (error) {

@@ -124,16 +124,21 @@ const HomePage = () => {
   // 加载所有浏览器配置
   const loadProfiles = async () => {
     try {
-      const result = await window.electron.browser.list()
-      if (result.success && result.data && result.data.list) {
+      // 从数据库读取账号列表
+      const result = await window.electron.db.getBrowserProfiles()
+      console.log('HomePage - 数据库账号列表:', result)
+
+      if (result && Array.isArray(result)) {
         // 只显示有文件夹路径的配置
-        const profilesWithFolder = result.data.list.filter(
+        const profilesWithFolder = result.filter(
           (p) => p.folder_path && p.folder_path.trim() !== ''
         )
+        console.log('HomePage - 有文件夹路径的账号:', profilesWithFolder)
         setProfiles(profilesWithFolder)
       }
     } catch (error) {
       message.error(`加载账号失败: ${error.message}`)
+      console.error('HomePage - 加载账号失败:', error)
     }
   }
 
