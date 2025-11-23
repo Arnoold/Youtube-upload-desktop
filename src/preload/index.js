@@ -5,7 +5,9 @@ contextBridge.exposeInMainWorld('electron', {
   // 文件管理
   file: {
     scan: (folderPath) => ipcRenderer.invoke('file:scan', folderPath),
-    move: (sourcePath, destFolder) => ipcRenderer.invoke('file:move', sourcePath, destFolder)
+    scanShallow: (folderPath) => ipcRenderer.invoke('file:scan-shallow', folderPath),
+    move: (sourcePath, destFolder) => ipcRenderer.invoke('file:move', sourcePath, destFolder),
+    moveToPublished: (folderPath) => ipcRenderer.invoke('file:move-to-published', folderPath)
   },
 
   // 比特浏览器
