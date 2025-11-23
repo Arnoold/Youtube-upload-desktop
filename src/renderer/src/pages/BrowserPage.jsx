@@ -123,10 +123,37 @@ const BrowserPage = () => {
   const loadProfiles = async () => {
     setLoading(true)
     try {
-      const result = await window.electron.browser.list()
-      if (result.success && result.data && result.data.list) {
-        setProfiles(result.data.list)
+      // 从数据库读取已添加的账号配置
+      const dbProfiles = await window.electron.db.getBrowserProfiles()
+      console.log('BrowserPage - 数据库账号列表:', dbProfiles)
+
+      if (!dbProfiles || !Array.isArray(dbProfiles)) {
+        setProfiles([])
+        return
       }
+
+      // 从比特浏览器 API 获取所有配置状态
+      const bitBrowserResult = await window.electron.browser.list()
+      const bitBrowserProfiles = bitBrowserResult?.data?.list || []
+
+      // 合并数据：将数据库配置与比特浏览器状态匹配
+      const mergedProfiles = dbProfiles.map((dbProfile) => {
+        // 根据 bit_browser_id 查找对应的比特浏览器配置
+        const bitProfile = bitBrowserProfiles.find(
+          (bp) => bp.id === dbProfile.bit_browser_id
+        )
+
+        return {
+          ...dbProfile,
+          // 添加比特浏览器的额外信息
+          remark: bitProfile?.remark || '',
+          proxyType: bitProfile?.proxyType || '',
+          browserStatus: bitProfile ? 'active' : 'not_found'
+        }
+      })
+
+      console.log('BrowserPage - 合并后的账号列表:', mergedProfiles)
+      setProfiles(mergedProfiles)
     } catch (error) {
       console.error('Failed to load profiles:', error)
     } finally {
@@ -254,10 +281,32 @@ const BrowserPage = () => {
       width: 150
     },
     {
+      title: '比特浏览器ID',
+      dataIndex: 'bit_browser_id',
+      key: 'bit_browser_id',
+      width: 150,
+      ellipsis: true
+    },
+    {
+      title: '状态',
+      dataIndex: 'browserStatus',
+      key: 'browserStatus',
+      width: 100,
+      render: (status) => {
+        if (status === 'active') {
+          return <Typography.Text type="success">✓ 正常</Typography.Text>
+        } else if (status === 'not_found') {
+          return <Typography.Text type="danger">✗ 未找到</Typography.Text>
+        }
+        return <Typography.Text type="warning">? 未知</Typography.Text>
+      }
+    },
+    {
       title: '备注',
       dataIndex: 'remark',
       key: 'remark',
-      width: 150
+      width: 150,
+      ellipsis: true
     },
     {
       title: '文件夹路径',
