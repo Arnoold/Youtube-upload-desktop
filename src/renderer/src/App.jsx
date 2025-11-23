@@ -30,7 +30,7 @@ const App = () => {
     {
       key: 'browser',
       icon: <ChromeOutlined />,
-      label: '浏览器配置'
+      label: '账号管理'
     },
     {
       key: 'settings',

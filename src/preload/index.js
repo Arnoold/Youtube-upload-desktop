@@ -2,6 +2,11 @@ const { contextBridge, ipcRenderer } = require('electron')
 
 // 暴露安全的 API 给渲染进程
 contextBridge.exposeInMainWorld('electron', {
+  // 系统对话框
+  dialog: {
+    selectFolder: () => ipcRenderer.invoke('dialog:select-folder')
+  },
+
   // 文件管理
   file: {
     scan: (folderPath) => ipcRenderer.invoke('file:scan', folderPath),
@@ -47,6 +52,8 @@ contextBridge.exposeInMainWorld('electron', {
   db: {
     getBrowserProfiles: () => ipcRenderer.invoke('db:browser-profiles'),
     saveBrowserProfile: (profile) => ipcRenderer.invoke('db:save-browser-profile', profile),
+    updateBrowserProfile: (id, updates) => ipcRenderer.invoke('db:update-browser-profile', id, updates),
+    deleteBrowserProfile: (id) => ipcRenderer.invoke('db:delete-browser-profile', id),
     getSetting: (key) => ipcRenderer.invoke('db:get-setting', key),
     setSetting: (key, value) => ipcRenderer.invoke('db:set-setting', key, value)
   }

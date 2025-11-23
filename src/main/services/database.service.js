@@ -60,6 +60,7 @@ class DatabaseService {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
         bit_browser_id TEXT,
+        folder_path TEXT,
         channel_id TEXT,
         channel_name TEXT,
         youtube_email TEXT,
@@ -148,13 +149,14 @@ class DatabaseService {
   createBrowserProfile(profile) {
     const stmt = this.db.prepare(`
       INSERT INTO browser_profiles (
-        name, bit_browser_id, channel_id, channel_name, youtube_email
-      ) VALUES (?, ?, ?, ?, ?)
+        name, bit_browser_id, folder_path, channel_id, channel_name, youtube_email
+      ) VALUES (?, ?, ?, ?, ?, ?)
     `)
 
     const info = stmt.run(
       profile.name,
       profile.bitBrowserId || null,
+      profile.folderPath || null,
       profile.channelId || null,
       profile.channelName || null,
       profile.youtubeEmail || null
