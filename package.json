@@ -27,6 +27,7 @@
     "better-sqlite3": "^9.2.2",
     "chokidar": "^3.5.3",
     "date-fns": "^3.0.6",
+    "dayjs": "^1.11.10",
     "electron-updater": "^6.1.7",
     "fs-extra": "^11.2.0",
     "glob": "^10.3.10",
