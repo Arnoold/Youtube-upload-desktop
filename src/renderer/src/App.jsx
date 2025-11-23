@@ -60,14 +60,14 @@ const App = () => {
         algorithm: theme.defaultAlgorithm
       }}
     >
-      <Layout style={{ minHeight: '100vh' }}>
-        <Header style={{ display: 'flex', alignItems: 'center', background: '#001529' }}>
+      <Layout style={{ height: '100vh', overflow: 'hidden' }}>
+        <Header style={{ display: 'flex', alignItems: 'center', background: '#001529', flexShrink: 0 }}>
           <div style={{ color: 'white', fontSize: '18px', fontWeight: 'bold' }}>
             YouTube 视频自动上传工具
           </div>
         </Header>
-        <Layout>
-          <Sider width={200} style={{ background: '#fff' }}>
+        <Layout style={{ flex: 1, overflow: 'hidden' }}>
+          <Sider width={200} style={{ background: '#fff', overflow: 'auto' }}>
             <Menu
               mode="inline"
               selectedKeys={[currentPage]}
@@ -76,12 +76,11 @@ const App = () => {
               onClick={({ key }) => setCurrentPage(key)}
             />
           </Sider>
-          <Layout style={{ padding: '24px' }}>
+          <Layout style={{ padding: '24px', overflow: 'auto' }}>
             <Content
               style={{
                 padding: 24,
                 margin: 0,
-                minHeight: 280,
                 background: '#fff',
                 borderRadius: 8
               }}

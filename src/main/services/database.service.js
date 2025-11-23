@@ -64,10 +64,20 @@ class DatabaseService {
         channel_name TEXT,
         youtube_email TEXT,
         is_logged_in INTEGER DEFAULT 0,
+        sort_order INTEGER DEFAULT 0,
         last_used_at DATETIME,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `)
+
+    // 检查是否存在 sort_order 列，如果不存在则添加
+    try {
+      this.db.exec(`
+        ALTER TABLE browser_profiles ADD COLUMN sort_order INTEGER DEFAULT 0
+      `)
+    } catch (error) {
+      // 列已存在，忽略错误
+    }
 
     // 创建设置表
     this.db.exec(`
@@ -201,7 +211,7 @@ class DatabaseService {
   }
 
   getBrowserProfiles() {
-    return this.db.prepare('SELECT * FROM browser_profiles ORDER BY created_at DESC').all()
+    return this.db.prepare('SELECT * FROM browser_profiles ORDER BY sort_order ASC, created_at DESC').all()
   }
 
   getBrowserProfileById(id) {
@@ -224,6 +234,21 @@ class DatabaseService {
 
   deleteBrowserProfile(id) {
     return this.db.prepare('DELETE FROM browser_profiles WHERE id = ?').run(id)
+  }
+
+  // 批量更新浏览器配置排序
+  updateBrowserProfilesOrder(profiles) {
+    const stmt = this.db.prepare(`
+      UPDATE browser_profiles SET sort_order = ? WHERE id = ?
+    `)
+
+    const transaction = this.db.transaction((items) => {
+      for (const item of items) {
+        stmt.run(item.sortOrder, item.id)
+      }
+    })
+
+    return transaction(profiles)
   }
 
   // ===== 设置相关方法 =====
