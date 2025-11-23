@@ -47,6 +47,7 @@ contextBridge.exposeInMainWorld('electron', {
   db: {
     getBrowserProfiles: () => ipcRenderer.invoke('db:browser-profiles'),
     saveBrowserProfile: (profile) => ipcRenderer.invoke('db:save-browser-profile', profile),
+    updateProfilesOrder: (profiles) => ipcRenderer.invoke('db:update-profiles-order', profiles),
     getSetting: (key) => ipcRenderer.invoke('db:get-setting', key),
     setSetting: (key, value) => ipcRenderer.invoke('db:set-setting', key, value)
   }

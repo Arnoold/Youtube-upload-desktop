@@ -110,6 +110,15 @@ function setupIPC(mainWindow, services) {
     }
   })
 
+  ipcMain.handle('db:update-profiles-order', async (event, profiles) => {
+    try {
+      return dbService.updateBrowserProfilesOrder(profiles)
+    } catch (error) {
+      console.error('db:update-profiles-order error:', error)
+      throw error
+    }
+  })
+
   ipcMain.handle('db:get-setting', async (event, key) => {
     try {
       return dbService.getSetting(key)

@@ -23,6 +23,7 @@
   "dependencies": {
     "@ant-design/icons": "^5.2.6",
     "antd": "^5.12.8",
+    "array-move": "^4.0.0",
     "axios": "^1.6.5",
     "better-sqlite3": "^9.2.2",
     "chokidar": "^3.5.3",
@@ -33,7 +34,8 @@
     "playwright-core": "^1.40.1",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "react-router-dom": "^6.21.1"
+    "react-router-dom": "^6.21.1",
+    "react-sortable-hoc": "^2.0.0"
   },
   "devDependencies": {
     "@electron/rebuild": "^3.5.0",
