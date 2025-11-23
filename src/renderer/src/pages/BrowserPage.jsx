@@ -12,6 +12,8 @@ const BrowserPage = () => {
   const [modalVisible, setModalVisible] = useState(false)
   const [editingProfile, setEditingProfile] = useState(null)
   const [form] = Form.useForm()
+  const [profileVideos, setProfileVideos] = useState({}) // 存储每个配置的视频列表
+  const [loadingVideos, setLoadingVideos] = useState({}) // 存储加载状态
 
   // 加载账号列表
   const loadProfiles = async () => {
@@ -19,7 +21,7 @@ const BrowserPage = () => {
     try {
       const result = await window.electron.db.getBrowserProfiles()
       setProfiles(result || [])
-      // 加载完账号后，自动加载状态
+      // 加载完账号后,自动加载状态
       await loadProfilesStatus(result || [])
     } catch (error) {
       message.error(`加载失败: ${error.message}`)
@@ -178,6 +180,48 @@ const BrowserPage = () => {
     }
   }
 
+  // 获取视频文件列表
+  const handleGetVideos = async (profileId, folderPath) => {
+    if (!folderPath) {
+      message.warning('该配置未设置文件夹路径')
+      return
+    }
+
+    setLoadingVideos(prev => ({ ...prev, [profileId]: true }))
+    try {
+      const videos = await window.electron.file.scanShallow(folderPath)
+      setProfileVideos(prev => ({ ...prev, [profileId]: videos }))
+      message.success(`找到 ${videos.length} 个视频文件`)
+    } catch (error) {
+      message.error(`获取视频文件失败: ${error.message}`)
+      console.error(error)
+    } finally {
+      setLoadingVideos(prev => ({ ...prev, [profileId]: false }))
+    }
+  }
+
+  // 移动视频到已发布文件夹
+  const handleMoveToPublished = async (profileId, folderPath) => {
+    if (!folderPath) {
+      message.warning('该配置未设置文件夹路径')
+      return
+    }
+
+    try {
+      const result = await window.electron.file.moveToPublished(folderPath)
+      if (result.success) {
+        message.success(result.message)
+        // 重新获取视频列表
+        await handleGetVideos(profileId, folderPath)
+      } else {
+        message.warning(`${result.message},部分文件移动失败`)
+      }
+    } catch (error) {
+      message.error(`移动失败: ${error.message}`)
+      console.error(error)
+    }
+  }
+
   // 渲染浏览器状态
   const renderBrowserStatus = (status, record) => {
     if (!record.isBitBrowserRunning) {
@@ -298,7 +342,7 @@ const BrowserPage = () => {
             编辑
           </Button>
           <Popconfirm
-            title="确定删除这个账号吗？"
+            title="确定删除这个账号吗?"
             onConfirm={() => handleDelete(record.id)}
             okText="确定"
             cancelText="取消"
@@ -316,6 +360,71 @@ const BrowserPage = () => {
       )
     }
   ]
+
+  // 展开行渲染
+  const expandedRowRender = (record) => {
+    const videos = profileVideos[record.id] || []
+    const isLoading = loadingVideos[record.id] || false
+
+    const videoColumns = [
+      {
+        title: '文件名',
+        dataIndex: 'name',
+        key: 'name',
+        ellipsis: true
+      },
+      {
+        title: '大小',
+        dataIndex: 'sizeFormatted',
+        key: 'size',
+        width: 100
+      },
+      {
+        title: '修改时间',
+        dataIndex: 'modifiedTime',
+        key: 'modifiedTime',
+        width: 160,
+        render: (time) => new Date(time).toLocaleString('zh-CN')
+      }
+    ]
+
+    return (
+      <div style={{ padding: '12px 0' }}>
+        <Space style={{ marginBottom: 12 }}>
+          <Button
+            type="primary"
+            onClick={() => handleGetVideos(record.id, record.folder_path)}
+            loading={isLoading}
+          >
+            获取视频文件
+          </Button>
+          <Button
+            onClick={() => handleMoveToPublished(record.id, record.folder_path)}
+            disabled={videos.length === 0}
+          >
+            移动视频到已发布
+          </Button>
+          <Typography.Text type="secondary">
+            {record.folder_path ? `文件夹:${record.folder_path}` : '未设置文件夹路径'}
+          </Typography.Text>
+        </Space>
+
+        {videos.length > 0 ? (
+          <Table
+            columns={videoColumns}
+            dataSource={videos}
+            rowKey="id"
+            pagination={{ pageSize: 5 }}
+            size="small"
+          />
+        ) : (
+          <Typography.Text type="secondary">
+            {isLoading ? '正在加载...' : '点击"获取视频文件"按钮查看视频列表'}
+          </Typography.Text>
+        )}
+      </div>
+    )
+  }
 
   return (
     <div>
@@ -350,6 +459,10 @@ const BrowserPage = () => {
           showTotal: (total) => `共 ${total} 个账号`
         }}
         scroll={{ x: 1200 }}
+        expandable={{
+          expandedRowRender,
+          rowExpandable: (record) => record.folder_path !== null && record.folder_path !== ''
+        }}
       />
 
       <Modal
