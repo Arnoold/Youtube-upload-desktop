@@ -38,8 +38,25 @@ const BrowserPage = () => {
     setStatusLoading(true)
     try {
       // 先检查比特浏览器是否运行
-      const browserConnection = await window.electron.browser.test()
-      const isBitBrowserRunning = browserConnection.success
+      const browserListResult = await window.electron.browser.list()
+      const isBitBrowserRunning = browserListResult.success
+
+      // 获取比特浏览器中所有配置的状态
+      const bitBrowserProfiles = browserListResult.data?.list || []
+
+      // 调试：打印比特浏览器返回的数据
+      console.log('=== 比特浏览器配置列表 ===')
+      console.log('总数:', bitBrowserProfiles.length)
+      if (bitBrowserProfiles.length > 0) {
+        console.log('第一个配置示例:', bitBrowserProfiles[0])
+      }
+
+      // 创建一个 Map 来快速查找配置状态
+      const bitBrowserProfileMap = new Map()
+      bitBrowserProfiles.forEach(bp => {
+        bitBrowserProfileMap.set(bp.id, bp)
+        console.log(`配置 ${bp.id}: 名称=${bp.name}, status=${bp.status}, isOpen=${bp.isOpen}`)
+      })
 
       const profilesWithStatusData = await Promise.all(
         profilesList.map(async (profile) => {
@@ -48,12 +65,17 @@ const BrowserPage = () => {
 
           // 只有比特浏览器运行时才检查浏览器状态
           if (isBitBrowserRunning && profile.bit_browser_id) {
-            try {
-              const statusResult = await window.electron.browser.checkStatus(profile.bit_browser_id)
-              // 比特浏览器 API 返回的状态需要根据实际 API 调整
-              browserStatus = statusResult.success ? 'running' : 'stopped'
-            } catch (error) {
-              browserStatus = 'stopped'
+            const bitProfile = bitBrowserProfileMap.get(profile.bit_browser_id)
+            if (bitProfile) {
+              // 检查 status 字段判断浏览器是否打开
+              // 比特浏览器返回的状态字段可能是 status 或 isOpen
+              const isOpen = bitProfile.status === 'Open' ||
+                            bitProfile.isOpen === true ||
+                            bitProfile.status === 1
+              browserStatus = isOpen ? 'running' : 'stopped'
+            } else {
+              // 找不到对应的配置，可能配置ID不正确
+              browserStatus = 'unknown'
             }
           } else {
             browserStatus = isBitBrowserRunning ? 'stopped' : 'offline'

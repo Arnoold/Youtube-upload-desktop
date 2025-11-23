@@ -21,7 +21,7 @@ class BitBrowserService {
    */
   async testConnection() {
     try {
-      const response = await axios.get(`${this.apiUrl}/browser/list`, {
+      const response = await axios.post(`${this.apiUrl}/browser/list`, {}, {
         timeout: 5000
       })
       console.log('BitBrowser connection test successful')
@@ -48,7 +48,7 @@ class BitBrowserService {
    */
   async getProfiles() {
     try {
-      const response = await axios.get(`${this.apiUrl}/browser/list`)
+      const response = await axios.post(`${this.apiUrl}/browser/list`, {})
       console.log(`Retrieved ${response.data.data?.list?.length || 0} browser profiles`)
       return response.data
     } catch (error) {
