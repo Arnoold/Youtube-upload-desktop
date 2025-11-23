@@ -79,7 +79,27 @@ class DatabaseService {
       )
     `)
 
+    // 数据库迁移：检查并添加缺失的列
+    this.runMigrations()
+
     console.log('Database tables created/verified')
+  }
+
+  runMigrations() {
+    try {
+      // 检查 browser_profiles 表是否有 folder_path 列
+      const tableInfo = this.db.prepare("PRAGMA table_info(browser_profiles)").all()
+      const hasFolderPath = tableInfo.some(col => col.name === 'folder_path')
+
+      if (!hasFolderPath) {
+        console.log('Adding folder_path column to browser_profiles table...')
+        this.db.exec('ALTER TABLE browser_profiles ADD COLUMN folder_path TEXT')
+        console.log('Migration completed: folder_path column added')
+      }
+    } catch (error) {
+      console.error('Migration error:', error)
+      // 如果表不存在，忽略错误（会在上面的 CREATE TABLE IF NOT EXISTS 中创建）
+    }
   }
 
   // ===== 上传任务相关方法 =====

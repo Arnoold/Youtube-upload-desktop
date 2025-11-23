@@ -25,8 +25,13 @@ function createWindow() {
   })
 
   // 开发环境下加载 vite 开发服务器
-  if (process.env.VITE_DEV_SERVER_URL) {
-    mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL)
+  const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged
+
+  if (isDev) {
+    // 开发模式：加载 Vite 开发服务器
+    const devServerUrl = process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173'
+    console.log('Loading dev server:', devServerUrl)
+    mainWindow.loadURL(devServerUrl)
     mainWindow.webContents.openDevTools()
   } else {
     // 生产环境加载构建后的文件
