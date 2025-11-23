@@ -37,15 +37,19 @@ class FileService {
         files.map(async (filePath) => {
           try {
             const stats = await fs.stat(filePath)
+            const filename = path.basename(filePath)
+            const extractedTitle = this.extractTitleFromFilename(filename)
+
             return {
               id: this.generateFileId(filePath),
               path: filePath,
-              name: path.basename(filePath),
+              name: filename,
               size: stats.size,
               sizeFormatted: this.formatFileSize(stats.size),
               extension: path.extname(filePath).toLowerCase(),
               modifiedTime: stats.mtime,
-              folder: path.dirname(filePath)
+              folder: path.dirname(filePath),
+              extractedTitle: extractedTitle // 提取的标题
             }
           } catch (error) {
             console.error(`Error processing file ${filePath}:`, error)
@@ -191,6 +195,37 @@ class FileService {
    */
   generateFileId(filePath) {
     return Buffer.from(filePath).toString('base64')
+  }
+
+  /**
+   * 从文件名中提取视频标题
+   * @param {string} filename - 文件名（包含扩展名）
+   * @returns {string} 提取的标题，如果没有找到"成片"关键词则返回空字符串
+   */
+  extractTitleFromFilename(filename) {
+    try {
+      // 去掉文件扩展名
+      const nameWithoutExt = filename.replace(/\.[^/.]+$/, '')
+
+      // 查找"成片"关键词的位置
+      const keyword = '成片'
+      const keywordIndex = nameWithoutExt.indexOf(keyword)
+
+      if (keywordIndex === -1) {
+        // 如果没有找到"成片"，返回空字符串
+        console.log(`No "${keyword}" keyword found in filename: ${filename}`)
+        return ''
+      }
+
+      // 提取"成片"后面的所有内容作为标题
+      const title = nameWithoutExt.substring(keywordIndex + keyword.length).trim()
+
+      console.log(`Extracted title from "${filename}": "${title}"`)
+      return title
+    } catch (error) {
+      console.error('Error extracting title from filename:', error)
+      return ''
+    }
   }
 
   /**
