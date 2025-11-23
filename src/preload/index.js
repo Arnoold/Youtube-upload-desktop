@@ -2,25 +2,17 @@ const { contextBridge, ipcRenderer } = require('electron')
 
 // 暴露安全的 API 给渲染进程
 contextBridge.exposeInMainWorld('electron', {
-  // 系统对话框
-  dialog: {
-    selectFolder: () => ipcRenderer.invoke('dialog:select-folder')
-  },
-
   // 文件管理
   file: {
     scan: (folderPath) => ipcRenderer.invoke('file:scan', folderPath),
-    scanShallow: (folderPath) => ipcRenderer.invoke('file:scan-shallow', folderPath),
-    move: (sourcePath, destFolder) => ipcRenderer.invoke('file:move', sourcePath, destFolder),
-    moveToPublished: (folderPath) => ipcRenderer.invoke('file:move-to-published', folderPath)
+    move: (sourcePath, destFolder) => ipcRenderer.invoke('file:move', sourcePath, destFolder)
   },
 
   // 比特浏览器
   browser: {
     test: () => ipcRenderer.invoke('browser:test'),
     list: () => ipcRenderer.invoke('browser:list'),
-    create: (config) => ipcRenderer.invoke('browser:create', config),
-    checkStatus: (browserId) => ipcRenderer.invoke('browser:check-status', browserId)
+    create: (config) => ipcRenderer.invoke('browser:create', config)
   },
 
   // 上传任务
@@ -57,9 +49,13 @@ contextBridge.exposeInMainWorld('electron', {
     saveBrowserProfile: (profile) => ipcRenderer.invoke('db:save-browser-profile', profile),
     updateBrowserProfile: (id, updates) => ipcRenderer.invoke('db:update-browser-profile', id, updates),
     deleteBrowserProfile: (id) => ipcRenderer.invoke('db:delete-browser-profile', id),
-    getProfileUploadStatus: (profileId) => ipcRenderer.invoke('db:profile-upload-status', profileId),
     getSetting: (key) => ipcRenderer.invoke('db:get-setting', key),
     setSetting: (key, value) => ipcRenderer.invoke('db:set-setting', key, value)
+  },
+
+  // 对话框
+  dialog: {
+    selectFolder: () => ipcRenderer.invoke('dialog:select-folder')
   }
 })
 

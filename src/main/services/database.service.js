@@ -60,7 +60,6 @@ class DatabaseService {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
         bit_browser_id TEXT,
-        folder_path TEXT,
         channel_id TEXT,
         channel_name TEXT,
         youtube_email TEXT,
@@ -69,18 +68,6 @@ class DatabaseService {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `)
-
-    // 迁移：为已存在的表添加 folder_path 列
-    try {
-      const columns = this.db.pragma('table_info(browser_profiles)')
-      const hasFolderPath = columns.some(col => col.name === 'folder_path')
-      if (!hasFolderPath) {
-        this.db.exec('ALTER TABLE browser_profiles ADD COLUMN folder_path TEXT')
-        console.log('Added folder_path column to browser_profiles table')
-      }
-    } catch (error) {
-      console.error('Error checking/adding folder_path column:', error)
-    }
 
     // 创建设置表
     this.db.exec(`
@@ -91,26 +78,38 @@ class DatabaseService {
       )
     `)
 
-    // 数据库迁移：检查并添加缺失的列
-    this.runMigrations()
+    // 迁移：为 browser_profiles 表添加新字段
+    this.migrateBrowserProfiles()
 
     console.log('Database tables created/verified')
   }
 
-  runMigrations() {
-    try {
-      // 检查 browser_profiles 表是否有 folder_path 列
-      const tableInfo = this.db.prepare("PRAGMA table_info(browser_profiles)").all()
-      const hasFolderPath = tableInfo.some(col => col.name === 'folder_path')
+  migrateBrowserProfiles() {
+    const columns = this.db.pragma('table_info(browser_profiles)')
+    const columnNames = columns.map(col => col.name)
 
-      if (!hasFolderPath) {
-        console.log('Adding folder_path column to browser_profiles table...')
-        this.db.exec('ALTER TABLE browser_profiles ADD COLUMN folder_path TEXT')
-        console.log('Migration completed: folder_path column added')
-      }
-    } catch (error) {
-      console.error('Migration error:', error)
-      // 如果表不存在，忽略错误（会在上面的 CREATE TABLE IF NOT EXISTS 中创建）
+    // 添加 folder_path 字段
+    if (!columnNames.includes('folder_path')) {
+      this.db.exec('ALTER TABLE browser_profiles ADD COLUMN folder_path TEXT')
+      console.log('Added folder_path column to browser_profiles')
+    }
+
+    // 添加 default_timezone 字段
+    if (!columnNames.includes('default_timezone')) {
+      this.db.exec("ALTER TABLE browser_profiles ADD COLUMN default_timezone TEXT DEFAULT 'Asia/Shanghai'")
+      console.log('Added default_timezone column to browser_profiles')
+    }
+
+    // 添加 default_description 字段
+    if (!columnNames.includes('default_description')) {
+      this.db.exec('ALTER TABLE browser_profiles ADD COLUMN default_description TEXT')
+      console.log('Added default_description column to browser_profiles')
+    }
+
+    // 添加 default_tags 字段
+    if (!columnNames.includes('default_tags')) {
+      this.db.exec('ALTER TABLE browser_profiles ADD COLUMN default_tags TEXT')
+      console.log('Added default_tags column to browser_profiles')
     }
   }
 
@@ -181,17 +180,21 @@ class DatabaseService {
   createBrowserProfile(profile) {
     const stmt = this.db.prepare(`
       INSERT INTO browser_profiles (
-        name, bit_browser_id, folder_path, channel_id, channel_name, youtube_email
-      ) VALUES (?, ?, ?, ?, ?, ?)
+        name, bit_browser_id, channel_id, channel_name, youtube_email,
+        folder_path, default_timezone, default_description, default_tags
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
 
     const info = stmt.run(
       profile.name,
       profile.bitBrowserId || null,
-      profile.folderPath || null,
       profile.channelId || null,
       profile.channelName || null,
-      profile.youtubeEmail || null
+      profile.youtubeEmail || null,
+      profile.folderPath || null,
+      profile.defaultTimezone || 'Asia/Shanghai',
+      profile.defaultDescription || null,
+      profile.defaultTags || null
     )
 
     return info.lastInsertRowid
@@ -221,25 +224,6 @@ class DatabaseService {
 
   deleteBrowserProfile(id) {
     return this.db.prepare('DELETE FROM browser_profiles WHERE id = ?').run(id)
-  }
-
-  getProfileUploadStatus(profileId) {
-    const uploadingTask = this.db.prepare(`
-      SELECT * FROM upload_tasks
-      WHERE browser_profile_id = ? AND status = 'uploading'
-      LIMIT 1
-    `).get(profileId)
-
-    const pendingCount = this.db.prepare(`
-      SELECT COUNT(*) as count FROM upload_tasks
-      WHERE browser_profile_id = ? AND status = 'pending'
-    `).get(profileId)
-
-    return {
-      isUploading: !!uploadingTask,
-      currentTask: uploadingTask,
-      pendingCount: pendingCount?.count || 0
-    }
   }
 
   // ===== 设置相关方法 =====

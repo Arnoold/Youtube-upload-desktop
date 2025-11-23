@@ -3,20 +3,6 @@ const { ipcMain, dialog } = require('electron')
 function setupIPC(mainWindow, services) {
   const { dbService, fileService, bitBrowserService, uploadService } = services
 
-  // ===== 系统对话框 =====
-
-  ipcMain.handle('dialog:select-folder', async () => {
-    try {
-      const result = await dialog.showOpenDialog(mainWindow, {
-        properties: ['openDirectory']
-      })
-      return result.canceled ? null : result.filePaths[0]
-    } catch (error) {
-      console.error('dialog:select-folder error:', error)
-      throw error
-    }
-  })
-
   // ===== 文件管理相关 =====
 
   ipcMain.handle('file:scan', async (event, folderPath) => {
@@ -33,24 +19,6 @@ function setupIPC(mainWindow, services) {
       return await fileService.moveFile(sourcePath, destFolder)
     } catch (error) {
       console.error('file:move error:', error)
-      throw error
-    }
-  })
-
-  ipcMain.handle('file:scan-shallow', async (event, folderPath) => {
-    try {
-      return await fileService.scanFolderShallow(folderPath)
-    } catch (error) {
-      console.error('file:scan-shallow error:', error)
-      throw error
-    }
-  })
-
-  ipcMain.handle('file:move-to-published', async (event, folderPath) => {
-    try {
-      return await fileService.moveToPublishedFolder(folderPath)
-    } catch (error) {
-      console.error('file:move-to-published error:', error)
       throw error
     }
   })
@@ -81,15 +49,6 @@ function setupIPC(mainWindow, services) {
     } catch (error) {
       console.error('browser:create error:', error)
       throw error
-    }
-  })
-
-  ipcMain.handle('browser:check-status', async (event, browserId) => {
-    try {
-      return await bitBrowserService.checkBrowserStatus(browserId)
-    } catch (error) {
-      console.error('browser:check-status error:', error)
-      return { success: false, error: error.message }
     }
   })
 
@@ -169,15 +128,6 @@ function setupIPC(mainWindow, services) {
     }
   })
 
-  ipcMain.handle('db:profile-upload-status', async (event, profileId) => {
-    try {
-      return dbService.getProfileUploadStatus(profileId)
-    } catch (error) {
-      console.error('db:profile-upload-status error:', error)
-      throw error
-    }
-  })
-
   ipcMain.handle('db:get-setting', async (event, key) => {
     try {
       return dbService.getSetting(key)
@@ -192,6 +142,19 @@ function setupIPC(mainWindow, services) {
       return dbService.setSetting(key, value)
     } catch (error) {
       console.error('db:set-setting error:', error)
+      throw error
+    }
+  })
+
+  // ===== 对话框相关 =====
+
+  ipcMain.handle('dialog:select-folder', async () => {
+    try {
+      return await dialog.showOpenDialog(mainWindow, {
+        properties: ['openDirectory']
+      })
+    } catch (error) {
+      console.error('dialog:select-folder error:', error)
       throw error
     }
   })

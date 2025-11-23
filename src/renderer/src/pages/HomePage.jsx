@@ -153,7 +153,7 @@ const HomePage = () => {
       const videos = await window.electron.file.scanShallow(profile.folder_path)
       setAccountVideos((prev) => ({ ...prev, [profile.id]: videos }))
 
-      // 为每个视频初始化默认设置
+      // 为每个视频初始化默认设置（使用账号的默认时区）
       videos.forEach((video) => {
         const videoKey = `${profile.id}_${video.id}`
         if (!videoSettings[videoKey]) {
@@ -161,7 +161,7 @@ const HomePage = () => {
             ...prev,
             [videoKey]: {
               publishTime: dayjs().add(1, 'hour'),
-              timezone: 'Asia/Shanghai'
+              timezone: profile.default_timezone || 'Asia/Shanghai'
             }
           }))
         }
@@ -240,15 +240,25 @@ const HomePage = () => {
     }
 
     try {
+      // 使用账号的默认说明和标签
+      let defaultTags = []
+      if (profile.default_tags) {
+        try {
+          defaultTags = JSON.parse(profile.default_tags)
+        } catch (e) {
+          console.error('Failed to parse default_tags:', e)
+        }
+      }
+
       const taskData = {
         videoPath: video.path,
         videoName: video.name,
         title: video.name.replace(/\.[^/.]+$/, ''), // 移除扩展名
-        description: '',
+        description: profile.default_description || '',
         privacy: 'public',
         madeForKids: false,
         browserProfileId: profile.id,
-        tags: [],
+        tags: defaultTags,
         scheduledTime: settings.publishTime.toISOString(),
         timezone: settings.timezone
       }
