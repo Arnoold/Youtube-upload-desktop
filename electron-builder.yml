@@ -1,0 +1,21 @@
+appId: com.arnoold.youtube-upload
+productName: YouTube Upload Desktop
+directories:
+  buildResources: resources
+  output: release/${version}
+files:
+  - dist-electron
+  - dist
+asarUnpack:
+  - node_modules/better-sqlite3
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: resources/icon.ico
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
