@@ -66,6 +66,15 @@ function setupIPC(mainWindow, services) {
     }
   })
 
+  ipcMain.handle('browser:check-status', async (event, browserId) => {
+    try {
+      return await bitBrowserService.checkBrowserStatus(browserId)
+    } catch (error) {
+      console.error('browser:check-status error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
   // ===== 上传任务相关 =====
 
   ipcMain.handle('upload:create', async (event, taskData) => {
@@ -138,6 +147,15 @@ function setupIPC(mainWindow, services) {
       return dbService.deleteBrowserProfile(id)
     } catch (error) {
       console.error('db:delete-browser-profile error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('db:profile-upload-status', async (event, profileId) => {
+    try {
+      return dbService.getProfileUploadStatus(profileId)
+    } catch (error) {
+      console.error('db:profile-upload-status error:', error)
       throw error
     }
   })

@@ -1,12 +1,14 @@
 import React, { useState, useEffect } from 'react'
-import { Typography, Button, message, Table, Modal, Form, Input, Space, Popconfirm } from 'antd'
-import { PlusOutlined, EditOutlined, DeleteOutlined, FolderOpenOutlined } from '@ant-design/icons'
+import { Typography, Button, message, Table, Modal, Form, Input, Space, Popconfirm, Tag, Tooltip } from 'antd'
+import { PlusOutlined, EditOutlined, DeleteOutlined, FolderOpenOutlined, ReloadOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined } from '@ant-design/icons'
 
 const { Title } = Typography
 
 const BrowserPage = () => {
   const [profiles, setProfiles] = useState([])
+  const [profilesWithStatus, setProfilesWithStatus] = useState([])
   const [loading, setLoading] = useState(false)
+  const [statusLoading, setStatusLoading] = useState(false)
   const [modalVisible, setModalVisible] = useState(false)
   const [editingProfile, setEditingProfile] = useState(null)
   const [form] = Form.useForm()
@@ -17,6 +19,8 @@ const BrowserPage = () => {
     try {
       const result = await window.electron.db.getBrowserProfiles()
       setProfiles(result || [])
+      // 加载完账号后，自动加载状态
+      await loadProfilesStatus(result || [])
     } catch (error) {
       message.error(`加载失败: ${error.message}`)
       console.error('Failed to load profiles:', error)
@@ -25,8 +29,80 @@ const BrowserPage = () => {
     }
   }
 
+  // 加载所有账号的状态
+  const loadProfilesStatus = async (profilesList = profiles) => {
+    if (profilesList.length === 0) return
+
+    setStatusLoading(true)
+    try {
+      // 先检查比特浏览器是否运行
+      const browserConnection = await window.electron.browser.test()
+      const isBitBrowserRunning = browserConnection.success
+
+      const profilesWithStatusData = await Promise.all(
+        profilesList.map(async (profile) => {
+          let browserStatus = 'unknown'
+          let uploadStatus = { isUploading: false, pendingCount: 0 }
+
+          // 只有比特浏览器运行时才检查浏览器状态
+          if (isBitBrowserRunning && profile.bit_browser_id) {
+            try {
+              const statusResult = await window.electron.browser.checkStatus(profile.bit_browser_id)
+              // 比特浏览器 API 返回的状态需要根据实际 API 调整
+              browserStatus = statusResult.success ? 'running' : 'stopped'
+            } catch (error) {
+              browserStatus = 'stopped'
+            }
+          } else {
+            browserStatus = isBitBrowserRunning ? 'stopped' : 'offline'
+          }
+
+          // 检查上传状态
+          try {
+            uploadStatus = await window.electron.db.getProfileUploadStatus(profile.id)
+          } catch (error) {
+            console.error(`Failed to get upload status for profile ${profile.id}:`, error)
+          }
+
+          return {
+            ...profile,
+            browserStatus,
+            uploadStatus,
+            isBitBrowserRunning
+          }
+        })
+      )
+
+      setProfilesWithStatus(profilesWithStatusData)
+    } catch (error) {
+      console.error('Failed to load profiles status:', error)
+      // 即使失败也要显示基本信息
+      setProfilesWithStatus(profilesList.map(p => ({
+        ...p,
+        browserStatus: 'unknown',
+        uploadStatus: { isUploading: false, pendingCount: 0 }
+      })))
+    } finally {
+      setStatusLoading(false)
+    }
+  }
+
+  // 刷新状态
+  const handleRefreshStatus = async () => {
+    await loadProfilesStatus(profiles)
+  }
+
   useEffect(() => {
     loadProfiles()
+
+    // 每30秒自动刷新状态
+    const interval = setInterval(() => {
+      if (profiles.length > 0) {
+        loadProfilesStatus(profiles)
+      }
+    }, 30000)
+
+    return () => clearInterval(interval)
   }, [])
 
   // 打开新增/编辑对话框
@@ -102,24 +178,95 @@ const BrowserPage = () => {
     }
   }
 
+  // 渲染浏览器状态
+  const renderBrowserStatus = (status, record) => {
+    if (!record.isBitBrowserRunning) {
+      return (
+        <Tooltip title="比特浏览器未运行">
+          <Tag icon={<CloseCircleOutlined />} color="default">离线</Tag>
+        </Tooltip>
+      )
+    }
+
+    switch (status) {
+      case 'running':
+        return (
+          <Tooltip title="浏览器已打开">
+            <Tag icon={<CheckCircleOutlined />} color="success">已打开</Tag>
+          </Tooltip>
+        )
+      case 'stopped':
+        return (
+          <Tooltip title="浏览器未打开">
+            <Tag icon={<CloseCircleOutlined />} color="default">未打开</Tag>
+          </Tooltip>
+        )
+      default:
+        return (
+          <Tooltip title="状态未知">
+            <Tag color="default">未知</Tag>
+          </Tooltip>
+        )
+    }
+  }
+
+  // 渲染运行状态
+  const renderUploadStatus = (uploadStatus) => {
+    if (uploadStatus.isUploading) {
+      return (
+        <Tooltip title="正在上传视频">
+          <Tag icon={<SyncOutlined spin />} color="processing">上传中</Tag>
+        </Tooltip>
+      )
+    }
+
+    if (uploadStatus.pendingCount > 0) {
+      return (
+        <Tooltip title={`有 ${uploadStatus.pendingCount} 个待上传任务`}>
+          <Tag color="warning">待上传 ({uploadStatus.pendingCount})</Tag>
+        </Tooltip>
+      )
+    }
+
+    return (
+      <Tooltip title="空闲中">
+        <Tag color="default">空闲</Tag>
+      </Tooltip>
+    )
+  }
+
   const columns = [
     {
       title: 'ID',
       dataIndex: 'id',
       key: 'id',
-      width: 80
+      width: 60
     },
     {
       title: '账号名称',
       dataIndex: 'name',
       key: 'name',
-      width: 200
+      width: 180
     },
     {
       title: '指纹浏览器ID',
       dataIndex: 'bit_browser_id',
       key: 'bit_browser_id',
-      width: 200
+      width: 150
+    },
+    {
+      title: '浏览器状态',
+      dataIndex: 'browserStatus',
+      key: 'browserStatus',
+      width: 120,
+      render: (status, record) => renderBrowserStatus(status, record)
+    },
+    {
+      title: '运行状态',
+      dataIndex: 'uploadStatus',
+      key: 'uploadStatus',
+      width: 130,
+      render: (uploadStatus) => renderUploadStatus(uploadStatus)
     },
     {
       title: '文件夹路径',
@@ -132,7 +279,7 @@ const BrowserPage = () => {
       title: '创建时间',
       dataIndex: 'created_at',
       key: 'created_at',
-      width: 180,
+      width: 160,
       render: (time) => new Date(time).toLocaleString('zh-CN')
     },
     {
@@ -174,26 +321,35 @@ const BrowserPage = () => {
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <Title level={2} style={{ margin: 0 }}>账号管理</Title>
-        <Button
-          type="primary"
-          icon={<PlusOutlined />}
-          onClick={() => handleOpenModal()}
-        >
-          新增账号
-        </Button>
+        <Space>
+          <Button
+            icon={<ReloadOutlined />}
+            onClick={handleRefreshStatus}
+            loading={statusLoading}
+          >
+            刷新状态
+          </Button>
+          <Button
+            type="primary"
+            icon={<PlusOutlined />}
+            onClick={() => handleOpenModal()}
+          >
+            新增账号
+          </Button>
+        </Space>
       </div>
 
       <Table
         columns={columns}
-        dataSource={profiles}
+        dataSource={profilesWithStatus}
         rowKey="id"
-        loading={loading}
+        loading={loading || statusLoading}
         pagination={{
           pageSize: 10,
           showSizeChanger: true,
           showTotal: (total) => `共 ${total} 个账号`
         }}
-        scroll={{ x: 1000 }}
+        scroll={{ x: 1200 }}
       />
 
       <Modal

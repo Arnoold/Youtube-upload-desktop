@@ -191,6 +191,25 @@ class DatabaseService {
     return this.db.prepare('DELETE FROM browser_profiles WHERE id = ?').run(id)
   }
 
+  getProfileUploadStatus(profileId) {
+    const uploadingTask = this.db.prepare(`
+      SELECT * FROM upload_tasks
+      WHERE browser_profile_id = ? AND status = 'uploading'
+      LIMIT 1
+    `).get(profileId)
+
+    const pendingCount = this.db.prepare(`
+      SELECT COUNT(*) as count FROM upload_tasks
+      WHERE browser_profile_id = ? AND status = 'pending'
+    `).get(profileId)
+
+    return {
+      isUploading: !!uploadingTask,
+      currentTask: uploadingTask,
+      pendingCount: pendingCount?.count || 0
+    }
+  }
+
   // ===== 设置相关方法 =====
 
   getSetting(key) {

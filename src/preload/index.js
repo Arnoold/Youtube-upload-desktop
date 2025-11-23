@@ -17,7 +17,8 @@ contextBridge.exposeInMainWorld('electron', {
   browser: {
     test: () => ipcRenderer.invoke('browser:test'),
     list: () => ipcRenderer.invoke('browser:list'),
-    create: (config) => ipcRenderer.invoke('browser:create', config)
+    create: (config) => ipcRenderer.invoke('browser:create', config),
+    checkStatus: (browserId) => ipcRenderer.invoke('browser:check-status', browserId)
   },
 
   // 上传任务
@@ -54,6 +55,7 @@ contextBridge.exposeInMainWorld('electron', {
     saveBrowserProfile: (profile) => ipcRenderer.invoke('db:save-browser-profile', profile),
     updateBrowserProfile: (id, updates) => ipcRenderer.invoke('db:update-browser-profile', id, updates),
     deleteBrowserProfile: (id) => ipcRenderer.invoke('db:delete-browser-profile', id),
+    getProfileUploadStatus: (profileId) => ipcRenderer.invoke('db:profile-upload-status', profileId),
     getSetting: (key) => ipcRenderer.invoke('db:get-setting', key),
     setSetting: (key, value) => ipcRenderer.invoke('db:set-setting', key, value)
   }
