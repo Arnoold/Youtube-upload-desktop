@@ -133,6 +133,26 @@ class HubStudioService {
   }
 
   /**
+   * 从 API 响应中提取浏览器状态列表
+   * HubStudio API 返回格式: { code: 0, data: { containers: [...], statusCode: "0", ... } }
+   */
+  extractContainersList(responseData) {
+    if (!responseData || !responseData.data) {
+      return []
+    }
+    const data = responseData.data
+    // API 返回 data.containers 数组
+    if (data.containers && Array.isArray(data.containers)) {
+      return data.containers
+    }
+    // 兼容：如果 data 本身是数组
+    if (Array.isArray(data)) {
+      return data
+    }
+    return []
+  }
+
+  /**
    * 启动浏览器实例
    * @param {string} containerCode - 环境ID (containerCode)
    * @returns {Promise<Object>} 浏览器信息
@@ -147,8 +167,10 @@ class HubStudioService {
         const statusResponse = await this.client.post(`${this.apiUrl}/api/v1/browser/all-browser-status`, {
           containerCodes: [containerCode]
         })
-        if (statusResponse.data.code === 0 && statusResponse.data.data) {
-          const browserStatus = statusResponse.data.data.find(b => b.containerCode === containerCode)
+        if (statusResponse.data.code === 0) {
+          const containersList = this.extractContainersList(statusResponse.data)
+          console.log('Containers list:', JSON.stringify(containersList, null, 2))
+          const browserStatus = containersList.find(b => b.containerCode === containerCode)
           // 状态 0 表示已开启
           if (browserStatus && browserStatus.status === 0) {
             console.log('Browser is already running, will try to connect to existing instance')
@@ -159,22 +181,20 @@ class HubStudioService {
         console.log('Failed to check existing browser status:', e.message)
       }
 
-      // 如果浏览器已经在运行，尝试直接获取连接信息
+      // 如果浏览器已经在运行，尝试直接获取连接信息（权限开通后 API 会返回 debuggingPort）
       if (existingBrowser) {
         console.log('Existing browser found:', JSON.stringify(existingBrowser, null, 2))
         let debugPort = existingBrowser.debuggingPort
         let wsEndpoint = ''
 
+        // 权限开通后，all-browser-status API 应该返回 debuggingPort
         if (debugPort) {
+          console.log('Got debuggingPort from status API:', debugPort)
           wsEndpoint = await this.getWsEndpointFromPort(debugPort)
         }
 
-        // 如果没有 debuggingPort，尝试扫描端口
-        if (!wsEndpoint) {
-          wsEndpoint = await this.scanForBrowserPort()
-        }
-
         if (wsEndpoint) {
+          console.log('Successfully connected to existing browser without calling start API')
           return {
             success: true,
             browserId: existingBrowser.browserID || containerCode,
@@ -183,8 +203,9 @@ class HubStudioService {
             webdriver: existingBrowser.webdriver
           }
         }
-        // 如果连接失败，继续尝试启动（不关闭现有的）
-        console.log('Could not connect to existing browser, will try to start/refresh')
+
+        // 如果 status API 没有返回 debuggingPort，说明权限可能还没生效，继续调用 start API
+        console.log('No debuggingPort in status API response, will call start API')
       }
 
       // HubStudio API - 启动浏览器（如果已经运行，这个调用会返回现有浏览器的信息）
@@ -200,10 +221,17 @@ class HubStudioService {
       if (response.data.code === 0) {
         const browserData = response.data.data
 
-        // HubStudio 返回格式: { data: { debuggingPort, browserID, webdriver, ... } }
+        // HubStudio 返回格式: { data: { debuggingPort, browserID, webdriver, duplicate, ... } }
         let debugPort = browserData?.debuggingPort || browserData?.debugging_port
         const browserId = browserData?.browserID || browserData?.containerId || containerCode
         const webdriver = browserData?.webdriver
+        const isDuplicate = browserData?.duplicate  // 如果浏览器已经在运行，会返回 duplicate 字段
+
+        // 如果是重复启动（浏览器已运行），debuggingPort 通常为空
+        // 需要通过其他方式获取连接信息
+        if (isDuplicate) {
+          console.log('Browser is already running (duplicate detected), need to get debug port from status API')
+        }
 
         // 如果 debuggingPort 为空，等待浏览器启动完成后再次获取状态
         if (!debugPort) {
@@ -222,19 +250,17 @@ class HubStudioService {
               })
               console.log('Browser status response:', JSON.stringify(statusResponse.data, null, 2))
 
-              if (statusResponse.data.code === 0 && statusResponse.data.data) {
-                const statusData = statusResponse.data.data
-                if (Array.isArray(statusData)) {
-                  const browserStatus = statusData.find(b => b.containerCode === containerCode)
-                  if (browserStatus?.debuggingPort) {
-                    debugPort = browserStatus.debuggingPort
-                    console.log('Got debuggingPort from status:', debugPort)
-                    break
-                  }
-                  // 检查状态是否为已开启 (status === 0)
-                  if (browserStatus?.status === 0) {
-                    console.log('Browser is running but no debuggingPort, will try port scanning...')
-                  }
+              if (statusResponse.data.code === 0) {
+                const containersList = this.extractContainersList(statusResponse.data)
+                const browserStatus = containersList.find(b => b.containerCode === containerCode)
+                if (browserStatus?.debuggingPort) {
+                  debugPort = browserStatus.debuggingPort
+                  console.log('Got debuggingPort from status:', debugPort)
+                  break
+                }
+                // 检查状态是否为已开启 (status === 0)
+                if (browserStatus?.status === 0) {
+                  console.log('Browser is running but no debuggingPort in status response')
                 }
               }
             } catch (e) {
@@ -256,8 +282,8 @@ class HubStudioService {
             const activeResponse = await this.client.post(`${this.apiUrl}/api/v1/browser/all-browser-status`, {
               containerCodes: []  // 获取所有活动浏览器
             })
-            if (activeResponse.data.code === 0 && activeResponse.data.data) {
-              const activeBrowsers = activeResponse.data.data
+            if (activeResponse.data.code === 0) {
+              const activeBrowsers = this.extractContainersList(activeResponse.data)
               console.log('Active browsers:', JSON.stringify(activeBrowsers, null, 2))
 
               const targetBrowser = activeBrowsers.find(b =>
@@ -276,9 +302,38 @@ class HubStudioService {
           }
         }
 
-        // 如果仍然没有找到端口，尝试扫描常见的调试端口范围
+        // 如果还是没有 wsEndpoint，尝试通过 browser/detail 接口获取
         if (!wsEndpoint) {
-          wsEndpoint = await this.scanForBrowserPort()
+          console.log('Trying to get debug port from browser/detail API...')
+          try {
+            const detailResponse = await this.client.post(`${this.apiUrl}/api/v1/browser/detail`, {
+              containerCode: containerCode
+            })
+            console.log('Browser detail response:', JSON.stringify(detailResponse.data, null, 2))
+            if (detailResponse.data.code === 0 && detailResponse.data.data) {
+              const detailData = detailResponse.data.data
+              if (detailData.debuggingPort) {
+                debugPort = detailData.debuggingPort
+                wsEndpoint = await this.getWsEndpointFromPort(debugPort)
+              }
+            }
+          } catch (e) {
+            console.log('browser/detail API not available or failed:', e.message)
+          }
+        }
+
+        // 如果 HubStudio API 没有返回 debuggingPort，尝试扫描端口
+        // 使用浏览器的 backgroundPluginId 来验证是否连接到正确的浏览器
+        if (!wsEndpoint) {
+          console.log('Trying port scanning to find browser...')
+          const pluginId = browserData?.backgroundPluginId || ''
+          if (pluginId) {
+            console.log('Expected backgroundPluginId:', pluginId)
+          }
+          wsEndpoint = await this.scanForBrowserByContainerCode(containerCode, pluginId)
+          if (wsEndpoint) {
+            console.log('Found browser via port scanning:', wsEndpoint)
+          }
         }
 
         // 尝试其他可能的字段
@@ -318,7 +373,225 @@ class HubStudioService {
   }
 
   /**
-   * 扫描常见端口查找浏览器
+   * 通过 WebSocket 连接到浏览器并获取命令行参数（包含 user-data-dir）
+   * @param {string} wsEndpoint - WebSocket 地址
+   * @returns {Promise<string>} 返回 user-data-dir 路径
+   */
+  async getBrowserUserDataDir(wsEndpoint) {
+    return new Promise((resolve) => {
+      const WebSocket = require('ws')
+      const ws = new WebSocket(wsEndpoint)
+      let resolved = false
+
+      const timeout = setTimeout(() => {
+        if (!resolved) {
+          resolved = true
+          ws.close()
+          resolve('')
+        }
+      }, 2000)
+
+      ws.on('open', () => {
+        // 发送 Browser.getBrowserCommandLine 命令
+        ws.send(JSON.stringify({
+          id: 1,
+          method: 'Browser.getBrowserCommandLine'
+        }))
+      })
+
+      ws.on('message', (data) => {
+        try {
+          const msg = JSON.parse(data.toString())
+          if (msg.id === 1 && msg.result && msg.result.arguments) {
+            const args = msg.result.arguments
+            // 查找 --user-data-dir 参数
+            for (const arg of args) {
+              if (arg.startsWith('--user-data-dir=')) {
+                const userDataDir = arg.replace('--user-data-dir=', '')
+                if (!resolved) {
+                  resolved = true
+                  clearTimeout(timeout)
+                  ws.close()
+                  resolve(userDataDir)
+                }
+                return
+              }
+            }
+          }
+          if (!resolved) {
+            resolved = true
+            clearTimeout(timeout)
+            ws.close()
+            resolve('')
+          }
+        } catch (e) {
+          if (!resolved) {
+            resolved = true
+            clearTimeout(timeout)
+            ws.close()
+            resolve('')
+          }
+        }
+      })
+
+      ws.on('error', () => {
+        if (!resolved) {
+          resolved = true
+          clearTimeout(timeout)
+          resolve('')
+        }
+      })
+    })
+  }
+
+  /**
+   * 扫描端口并通过 containerCode 验证是否是目标浏览器
+   * HubStudio 浏览器的 userDataDir 包含 containerCode，可以通过 CDP 获取
+   * @param {string} containerCode - 期望的环境ID
+   * @param {string} expectedPluginId - 期望的插件ID（可选）
+   */
+  async scanForBrowserByContainerCode(containerCode, expectedPluginId = '') {
+    console.log('Scanning ports to find browser with containerCode:', containerCode)
+
+    // HubStudio 使用动态端口，范围很广（1000-20000+）
+    // 优先扫描常见端口范围
+    const portsToScan = []
+
+    // 第一优先级：常见调试端口
+    const priorityPorts = [9222, 9223, 9224, 9225, 9226, 9227, 9228, 9229, 9230]
+    for (const p of priorityPorts) {
+      portsToScan.push(p)
+    }
+
+    // 第二优先级：HubStudio 常用端口范围 1000-2000
+    for (let i = 1000; i <= 2000; i++) {
+      if (!priorityPorts.includes(i)) {
+        portsToScan.push(i)
+      }
+    }
+
+    // 第三优先级：9000-9500 范围
+    for (let i = 9000; i <= 9500; i++) {
+      if (!priorityPorts.includes(i)) {
+        portsToScan.push(i)
+      }
+    }
+
+    // 第四优先级：10000-20000 范围（HubStudio 有时使用高端口如 14229）
+    for (let i = 10000; i <= 20000; i++) {
+      portsToScan.push(i)
+    }
+
+    // 存储找到的所有浏览器，用于后续选择
+    const foundBrowsers = []
+
+    // 并行扫描端口（每批50个，加快扫描速度）
+    const batchSize = 50
+    for (let i = 0; i < portsToScan.length; i += batchSize) {
+      const batch = portsToScan.slice(i, i + batchSize)
+      const results = await Promise.all(
+        batch.map(async port => {
+          try {
+            const httpUrl = `http://127.0.0.1:${port}`
+            // 获取浏览器版本信息
+            const versionResponse = await this.client.get(`${httpUrl}/json/version`, { timeout: 500 })
+            if (versionResponse.data && versionResponse.data.webSocketDebuggerUrl) {
+              const wsEndpoint = versionResponse.data.webSocketDebuggerUrl
+              const userAgent = versionResponse.data['User-Agent'] || ''
+
+              // 获取页面列表
+              const pagesResponse = await this.client.get(`${httpUrl}/json/list`, { timeout: 500 })
+              const pages = pagesResponse.data || []
+
+              // 方法1: 通过 CDP 获取 user-data-dir 并检查是否包含 containerCode
+              let userDataDir = ''
+              let matchesContainerCode = false
+              if (containerCode) {
+                userDataDir = await this.getBrowserUserDataDir(wsEndpoint)
+                if (userDataDir) {
+                  // HubStudio 的 userDataDir 路径通常包含 containerCode
+                  // 例如: C:\Users\xxx\AppData\Local\HubStudio\cache\containerCode\...
+                  matchesContainerCode = userDataDir.includes(containerCode)
+                  console.log(`Port ${port} userDataDir: ${userDataDir}, matches: ${matchesContainerCode}`)
+                }
+              }
+
+              // 方法2: 检查扩展插件ID（如果提供）
+              let hasMatchingExtension = false
+              if (expectedPluginId) {
+                hasMatchingExtension = pages.some(page =>
+                  page.url && page.url.includes(expectedPluginId)
+                )
+              }
+
+              return {
+                port,
+                wsEndpoint,
+                userAgent,
+                userDataDir,
+                pages,
+                matchesContainerCode,
+                hasMatchingExtension
+              }
+            }
+          } catch (e) {
+            // 忽略连接错误
+          }
+          return null
+        })
+      )
+
+      // 收集所有找到的浏览器
+      for (const r of results) {
+        if (r !== null) {
+          foundBrowsers.push(r)
+
+          // 如果找到匹配 containerCode 的浏览器，立即返回
+          if (r.matchesContainerCode) {
+            console.log(`Found matching browser at port ${r.port} with containerCode in userDataDir`)
+            return r.wsEndpoint
+          }
+
+          // 如果找到匹配插件的浏览器，立即返回
+          if (r.hasMatchingExtension) {
+            console.log(`Found matching browser at port ${r.port} with extension ${expectedPluginId}`)
+            return r.wsEndpoint
+          }
+        }
+      }
+    }
+
+    // 如果没有通过 containerCode 或插件ID找到，返回第一个找到的浏览器
+    // （只有一个浏览器运行时可用）
+    if (foundBrowsers.length === 1) {
+      console.log(`Found single browser at port ${foundBrowsers[0].port}, assuming it's the target`)
+      return foundBrowsers[0].wsEndpoint
+    }
+
+    if (foundBrowsers.length > 1) {
+      console.log(`Found ${foundBrowsers.length} browsers, cannot determine which is the target`)
+      console.log('Browsers found:', foundBrowsers.map(b => ({
+        port: b.port,
+        userDataDir: b.userDataDir
+      })))
+      // 如果有多个浏览器但没找到匹配的，返回空（不能随便连接）
+    }
+
+    console.log('No matching browser found via port scanning')
+    return ''
+  }
+
+  /**
+   * 扫描端口并通过 backgroundPluginId 验证是否是目标浏览器
+   * @param {string} expectedPluginId - 期望的插件ID
+   * @deprecated 使用 scanForBrowserByContainerCode 代替
+   */
+  async scanForBrowserWithPluginId(expectedPluginId) {
+    return this.scanForBrowserByContainerCode('', expectedPluginId)
+  }
+
+  /**
+   * 扫描常见端口查找浏览器（不验证身份，仅作为最后手段）
    */
   async scanForBrowserPort() {
     console.log('Scanning common debugging ports...')
@@ -420,9 +693,9 @@ class HubStudioService {
       })
 
       if (response.data.code === 0) {
-        const statusList = response.data.data || []
+        const containersList = this.extractContainersList(response.data)
         // 查找匹配的环境状态
-        const envStatus = statusList.find(item => item.containerCode === containerCode)
+        const envStatus = containersList.find(item => item.containerCode === containerCode)
         // 状态 0 表示已开启（Active）
         const isActive = envStatus && envStatus.status === 0
         return {
