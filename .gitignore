@@ -137,3 +137,26 @@ dist
 # Vite logs files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# Electron build output
+dist-electron/
+release/
+
+# IDE
+.vs/
+.idea/
+
+# Test files
+test*.js
+test*.html
+simple-test.js
+
+# Claude
+.claude/
+
+# Windows
+nul
+Thumbs.db
+
+# Resources (if contains large binaries)
+# resources/

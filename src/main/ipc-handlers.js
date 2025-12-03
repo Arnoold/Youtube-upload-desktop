@@ -1,7 +1,34 @@
-const { ipcMain, dialog } = require('electron')
-
 function setupIPC(mainWindow, services) {
-  const { dbService, fileService, bitBrowserService, uploadService } = services
+  const fs = require('fs')
+  const path = require('path')
+  const logPath = path.join(process.cwd(), 'debug_ipc.log')
+
+  try {
+    fs.appendFileSync(logPath, `[${new Date().toISOString()}] setupIPC called\n`)
+    fs.appendFileSync(logPath, `[${new Date().toISOString()}] Services keys: ${Object.keys(services || {}).join(', ')}\n`)
+  } catch (e) { console.error(e) }
+
+  // 延迟加载 electron 和服务，避免模块加载顺序问题
+  const { ipcMain, dialog } = require('electron')
+
+  try {
+    fs.appendFileSync(logPath, `[${new Date().toISOString()}] Requiring services...\n`)
+  } catch (e) { }
+
+  const supabaseService = require('./services/supabase.service')
+  const aiStudioService = require('./services/aistudio.service')
+  const clipboardLock = require('./services/clipboard-lock.service')
+  const douyinService = require('./services/douyin.service')
+
+  try {
+    fs.appendFileSync(logPath, `[${new Date().toISOString()}] Services required. Destructuring...\n`)
+  } catch (e) { }
+
+  const { dbService, fileService, bitBrowserService, hubStudioService, uploadService } = services
+
+  try {
+    fs.appendFileSync(logPath, `[${new Date().toISOString()}] Destructuring complete.\n`)
+  } catch (e) { }
 
   // ===== 文件管理相关 =====
 
@@ -67,6 +94,65 @@ function setupIPC(mainWindow, services) {
     } catch (error) {
       console.error('browser:create error:', error)
       throw error
+    }
+  })
+
+  ipcMain.handle('browser:check-status', async (event, browserId, browserType = 'bitbrowser') => {
+    try {
+      // 根据浏览器类型选择对应的服务
+      if (browserType === 'hubstudio') {
+        if (!hubStudioService) {
+          return { success: false, error: 'HubStudio 服务未初始化' }
+        }
+        return await hubStudioService.checkBrowserStatus(browserId)
+      }
+      return await bitBrowserService.checkBrowserStatus(browserId)
+    } catch (error) {
+      console.error('browser:check-status error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // ===== HubStudio 相关 =====
+
+  ipcMain.handle('hubstudio:set-credentials', async (event, appId, appSecret, groupCode) => {
+    try {
+      hubStudioService.setCredentials(appId, appSecret, groupCode)
+      // 保存到数据库
+      await dbService.setSetting('hubstudio_app_id', appId)
+      await dbService.setSetting('hubstudio_app_secret', appSecret)
+      await dbService.setSetting('hubstudio_group_code', groupCode)
+      return { success: true }
+    } catch (error) {
+      console.error('hubstudio:set-credentials error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('hubstudio:get-credentials', async () => {
+    try {
+      return hubStudioService.getCredentials()
+    } catch (error) {
+      console.error('hubstudio:get-credentials error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('hubstudio:test', async () => {
+    try {
+      return await hubStudioService.testConnection()
+    } catch (error) {
+      console.error('hubstudio:test error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('hubstudio:list', async () => {
+    try {
+      return await hubStudioService.getProfiles()
+    } catch (error) {
+      console.error('hubstudio:list error:', error)
+      return { success: false, error: error.message }
     }
   })
 
@@ -155,6 +241,95 @@ function setupIPC(mainWindow, services) {
     }
   })
 
+  // ===== AI Studio 账号 IPC =====
+
+  ipcMain.handle('db:ai-studio-accounts', async () => {
+    try {
+      return dbService.getAIStudioAccounts()
+    } catch (error) {
+      console.error('db:ai-studio-accounts error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('db:save-ai-studio-account', async (event, account) => {
+    try {
+      return dbService.createAIStudioAccount(account)
+    } catch (error) {
+      console.error('db:save-ai-studio-account error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('db:update-ai-studio-account', async (event, id, updates) => {
+    try {
+      return dbService.updateAIStudioAccount(id, updates)
+    } catch (error) {
+      console.error('db:update-ai-studio-account error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('db:delete-ai-studio-account', async (event, id) => {
+    try {
+      return dbService.deleteAIStudioAccount(id)
+    } catch (error) {
+      console.error('db:delete-ai-studio-account error:', error)
+      throw error
+    }
+  })
+
+  // ===== 解说词任务 IPC =====
+
+  ipcMain.handle('db:create-commentary-task', async (event, task) => {
+    try {
+      const taskId = dbService.createCommentaryTask(task)
+      if (task.items && task.items.length > 0) {
+        dbService.addCommentaryTaskItems(taskId, task.items)
+      }
+      return taskId
+    } catch (error) {
+      console.error('db:create-commentary-task error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('db:get-commentary-tasks', async () => {
+    try {
+      return dbService.getCommentaryTasks()
+    } catch (error) {
+      console.error('db:get-commentary-tasks error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('db:get-commentary-task-by-id', async (event, id) => {
+    try {
+      return dbService.getCommentaryTaskById(id)
+    } catch (error) {
+      console.error('db:get-commentary-task-by-id error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('db:get-commentary-task-items', async (event, taskId) => {
+    try {
+      return dbService.getCommentaryTaskItems(taskId)
+    } catch (error) {
+      console.error('db:get-commentary-task-items error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('db:delete-commentary-task', async (event, id) => {
+    try {
+      return dbService.deleteCommentaryTask(id)
+    } catch (error) {
+      console.error('db:delete-commentary-task error:', error)
+      throw error
+    }
+  })
+
   ipcMain.handle('db:get-setting', async (event, key) => {
     try {
       return dbService.getSetting(key)
@@ -198,6 +373,793 @@ function setupIPC(mainWindow, services) {
 
   uploadService.on('task-added', (data) => {
     mainWindow.webContents.send('upload:added', data)
+  })
+
+  // ===== Supabase 相关 =====
+
+  ipcMain.handle('supabase:connect', async (event, url, apiKey, tableName) => {
+    try {
+      supabaseService.initialize(url, apiKey)
+      if (tableName) {
+        supabaseService.setTableName(tableName)
+      }
+      return { success: true }
+    } catch (error) {
+      console.error('supabase:connect error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('supabase:test', async () => {
+    try {
+      return await supabaseService.testConnection()
+    } catch (error) {
+      console.error('supabase:test error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('supabase:get-config', async () => {
+    try {
+      return supabaseService.getConfig()
+    } catch (error) {
+      console.error('supabase:get-config error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('supabase:set-table', async (event, tableName) => {
+    try {
+      supabaseService.setTableName(tableName)
+      return { success: true }
+    } catch (error) {
+      console.error('supabase:set-table error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('supabase:get-videos', async (event, options) => {
+    try {
+      return await supabaseService.getVideos(options)
+    } catch (error) {
+      console.error('supabase:get-videos error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('supabase:get-video', async (event, id) => {
+    try {
+      return await supabaseService.getVideo(id)
+    } catch (error) {
+      console.error('supabase:get-video error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('supabase:update-status', async (event, id, status, errorMessage) => {
+    try {
+      return await supabaseService.updateStatus(id, status, errorMessage)
+    } catch (error) {
+      console.error('supabase:update-status error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('supabase:get-columns', async () => {
+    try {
+      return await supabaseService.getTableColumns()
+    } catch (error) {
+      console.error('supabase:get-columns error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('supabase:search-channels', async (event, keyword, limit) => {
+    try {
+      return await supabaseService.searchChannels(keyword, limit)
+    } catch (error) {
+      console.error('supabase:search-channels error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('supabase:get-groups', async () => {
+    try {
+      return await supabaseService.getGroups()
+    } catch (error) {
+      console.error('supabase:get-groups error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('supabase:disconnect', async () => {
+    try {
+      supabaseService.disconnect()
+      return { success: true }
+    } catch (error) {
+      console.error('supabase:disconnect error:', error)
+      throw error
+    }
+  })
+
+  // ===== AI Studio 相关 =====
+
+  ipcMain.handle('aistudio:set-prompt', async (event, prompt) => {
+    try {
+      aiStudioService.setDefaultPrompt(prompt)
+      return { success: true }
+    } catch (error) {
+      console.error('aistudio:set-prompt error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('aistudio:get-prompt', async () => {
+    try {
+      return aiStudioService.getDefaultPrompt()
+    } catch (error) {
+      console.error('aistudio:get-prompt error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('aistudio:process', async (event, video, browserProfileId) => {
+    try {
+      return await aiStudioService.processVideo(video, browserProfileId, (progress) => {
+        mainWindow.webContents.send('aistudio:progress', progress)
+      })
+    } catch (error) {
+      console.error('aistudio:process error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('aistudio:start-task', async (event, taskId, browserProfileIds) => {
+    try {
+      // 支持多浏览器并行执行
+      // browserProfileIds 可以是单个字符串或数组
+      const profileIds = Array.isArray(browserProfileIds) ? browserProfileIds : [browserProfileIds]
+
+      // 不等待 Promise 完成，直接返回，通过事件发送进度
+      if (profileIds.length > 1) {
+        // 多浏览器并行模式
+        aiStudioService.startParallelTask(taskId, profileIds, (progress) => {
+          mainWindow.webContents.send('aistudio:progress', progress)
+        }).catch(err => {
+          console.error('Async parallel task error:', err)
+          mainWindow.webContents.send('aistudio:progress', {
+            taskId,
+            status: 'error',
+            error: err.message,
+            message: '并行任务执行失败: ' + err.message
+          })
+        })
+      } else {
+        // 单浏览器模式（兼容旧逻辑）
+        aiStudioService.startTask(taskId, profileIds[0], (progress) => {
+          mainWindow.webContents.send('aistudio:progress', progress)
+        }).catch(err => {
+          console.error('Async task error:', err)
+          mainWindow.webContents.send('aistudio:progress', { status: 'error', error: err.message })
+        })
+      }
+      return { success: true, parallel: profileIds.length > 1, workerCount: profileIds.length }
+    } catch (error) {
+      console.error('aistudio:start-task error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('aistudio:stop-task', async () => {
+    try {
+      return aiStudioService.stopCurrentTask()
+    } catch (error) {
+      console.error('aistudio:stop-task error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('aistudio:status', async () => {
+    try {
+      return aiStudioService.getStatus()
+    } catch (error) {
+      console.error('aistudio:status error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('aistudio:cancel', async () => {
+    try {
+      return aiStudioService.cancelCurrentTask()
+    } catch (error) {
+      console.error('aistudio:cancel error:', error)
+      throw error
+    }
+  })
+
+  // 固定的 AI Studio 浏览器配置 (作为默认值)
+  const DEFAULT_BROWSER_ID = '0e7f85a348654b618508dc873b78389d'
+  const AI_STUDIO_URL = 'https://aistudio.google.com/prompts/new_chat'
+
+  ipcMain.handle('aistudio:open-browser', async (event, videoLink, browserId, prompt) => {
+    try {
+      const targetBrowserId = browserId || DEFAULT_BROWSER_ID
+      const targetVideoLink = videoLink || 'https://www.youtube.com/watch?v=ougJV1ULixk'
+
+      console.log('Opening AI Studio browser with ID:', targetBrowserId)
+      console.log('Test video link:', targetVideoLink)
+
+      // 启动 BitBrowser
+      const browserResult = await bitBrowserService.startBrowser(targetBrowserId)
+
+      if (!browserResult.success) {
+        throw new Error('启动浏览器失败: ' + (browserResult.msg || '未知错误'))
+      }
+
+      const wsEndpoint = browserResult.wsEndpoint
+      console.log('Browser started, wsEndpoint:', wsEndpoint)
+
+      if (!wsEndpoint) {
+        console.error('Browser started but no WebSocket endpoint found. Browser result:', browserResult)
+        throw new Error('Browser started but failed to get WebSocket URL. Please check BitBrowser configuration.')
+      }
+
+      // 使用 Playwright 连接并打开页面
+      const { playwrightService } = services
+      const connection = await playwrightService.connectBrowser(wsEndpoint)
+
+      const existingPages = connection.context.pages()
+      const initialPageCount = existingPages.length
+      console.log('[VERIFY_IPC] Existing pages count:', initialPageCount)
+
+      // 尝试创建新标签页
+      let page = await connection.context.newPage()
+
+      // 检查是否真的创建了新页面
+      const newPageCount = connection.context.pages().length
+      console.log('[VERIFY_IPC] New pages count:', newPageCount)
+
+      // 如果页面数量没有增加，说明 newPage() 可能复用了现有页面
+      // 或者 CDP 行为异常。尝试使用 window.open 强制打开新标签页
+      if (newPageCount <= initialPageCount && existingPages.length > 0) {
+        console.log('[VERIFY_IPC] newPage() failed to create new tab, trying window.open() fallback...')
+        const sourcePage = existingPages[0]
+
+        // 使用 window.open 打开新窗口
+        const [newPage] = await Promise.all([
+          connection.context.waitForEvent('page'),
+          sourcePage.evaluate(() => window.open('about:blank', '_blank'))
+        ])
+
+        if (newPage) {
+          page = newPage
+          console.log('[VERIFY_IPC] Successfully created new page via window.open')
+          // 等待页面稳定
+          await page.waitForTimeout(2000)
+        }
+      }
+
+      // 确保页面置顶
+      try {
+        await page.bringToFront()
+      } catch (e) {
+        console.error('Failed to bring page to front:', e)
+      }
+
+      // 导航到 AI Studio
+      console.log('[VERIFY_IPC] Navigating to AI Studio:', AI_STUDIO_URL)
+      await page.goto(AI_STUDIO_URL, {
+        waitUntil: 'domcontentloaded',
+        timeout: 60000
+      })
+
+      // === 测试交互逻辑 (演示用) ===
+      console.log('[VERIFY_IPC] Starting interaction demo...')
+      try {
+        // 1. 等待页面加载
+        await page.waitForTimeout(3000)
+
+        // 2. 查找输入框
+        console.log('[VERIFY_IPC] Looking for input...')
+        const inputSelectors = [
+          'textarea[aria-label*="prompt"]',
+          'textarea[placeholder*="Enter"]',
+          'textarea[placeholder*="Type"]',
+          '.chat-input textarea',
+          'textarea',
+          '[contenteditable="true"]',
+          '.ql-editor',
+          'div[role="textbox"]'
+        ]
+
+        let inputElement = null
+        for (const selector of inputSelectors) {
+          try {
+            const element = await page.locator(selector).first()
+            if (await element.isVisible()) {
+              inputElement = element
+              console.log('[VERIFY_IPC] Found input with selector:', selector)
+              break
+            }
+          } catch (e) {
+            continue
+          }
+        }
+
+        if (inputElement) {
+          // 3. 输入测试文本
+          console.log('[VERIFY_IPC] Starting input sequence...')
+
+          // 3.1 聚焦输入框
+          await inputElement.click()
+          await page.waitForTimeout(1000)
+
+          // 清空输入框 (Ctrl+A, Backspace)
+          await page.keyboard.press('Control+A')
+          await page.keyboard.press('Backspace')
+          await page.waitForTimeout(500)
+
+          // 3.2 粘贴视频链接 (使用剪贴板锁保护)
+          console.log('[VERIFY_IPC] Pasting link...')
+          await clipboardLock.writeAndPaste(page, targetVideoLink, 'ipc-paste-video-url')
+
+          // 3.2.1 验证视频附件是否出现
+          console.log('[VERIFY_IPC] Waiting for video attachment (ms-youtube-chunk)...')
+          try {
+            // 等待 YouTube 视频组件出现，这表示粘贴成功了
+            await page.waitForSelector('ms-youtube-chunk', {
+              state: 'visible',
+              timeout: 10000
+            })
+            console.log('[VERIFY_IPC] Video attachment detected.')
+          } catch (e) {
+            console.error('[VERIFY_IPC] Failed to detect video attachment after paste.')
+            return {
+              success: false,
+              message: '粘贴视频链接失败：未检测到视频附件，请检查链接是否有效或剪贴板权限。',
+              browserId: browserResult.browserId
+            }
+          }
+
+          // 3.2.2 等待视频处理完成 (齿轮图标)
+          console.log('[VERIFY_IPC] Waiting for video processing (settings_video_camera icon)...')
+          try {
+            // 等待 YouTube 视频处理完成，标志是出现 settings_video_camera 图标
+            await page.waitForSelector('mat-icon:has-text("settings_video_camera")', {
+              state: 'visible',
+              timeout: 60000
+            })
+            console.log('[VERIFY_IPC] Video processing complete (settings_video_camera icon found)')
+          } catch (e) {
+            console.error('[VERIFY_IPC] Timeout waiting for video processing.')
+            return {
+              success: false,
+              message: '视频处理超时：未检测到处理完成图标 (settings_video_camera)。',
+              browserId: browserResult.browserId
+            }
+          }
+
+          await page.waitForTimeout(1000)
+
+          // 3.3 输入提示词
+          console.log('[VERIFY_IPC] Typing prompt...')
+          // 换行
+          await page.keyboard.press('Shift+Enter')
+          await page.keyboard.press('Shift+Enter')
+
+          // 使用传入的 prompt，如果未传入则使用默认值 (虽然前端应该会传入)
+          const promptToUse = prompt || `请分析视频内容...` // 简化的默认值，实际逻辑由前端控制
+
+          // 确保输入框有焦点
+          await inputElement.click()
+          await page.waitForTimeout(500)
+
+          // 使用剪贴板锁保护粘贴操作
+          console.log('[VERIFY_IPC] Pasting prompt...')
+          await clipboardLock.writeAndPaste(page, promptToUse, 'ipc-paste-prompt')
+          console.log('[VERIFY_IPC] Input complete')
+
+          // 4. 尝试点击发送
+          console.log('[VERIFY_IPC] Ready to send...')
+          // 增加随机等待，模拟人类思考/检查
+          await page.waitForTimeout(2000 + Math.random() * 1000)
+
+          // 方法A: 尝试点击 Run 按钮
+          const runButtonSelectors = [
+            'button:has-text("Run")',
+            'button[aria-label="Run"]',
+            '[data-testid="run-button"]',
+            '.run-button'
+          ]
+
+          let runClicked = false
+          for (const selector of runButtonSelectors) {
+            try {
+              const btn = await page.locator(selector).first()
+              if (await btn.isVisible()) {
+                console.log('[VERIFY_IPC] Found Run button with selector:', selector)
+
+                // 模拟鼠标移动到按钮上
+                await btn.hover()
+                await page.waitForTimeout(500 + Math.random() * 500)
+
+                await btn.click()
+                runClicked = true
+                console.log('[VERIFY_IPC] Clicked Run button')
+                break
+              }
+            } catch (e) {
+              continue
+            }
+          }
+
+          // 方法B: 如果没找到按钮，使用快捷键 Ctrl+Enter
+          if (!runClicked) {
+            console.log('[VERIFY_IPC] Run button not found, trying Ctrl+Enter shortcut...')
+            await page.waitForTimeout(1000)
+            await inputElement.press('Control+Enter')
+            console.log('[VERIFY_IPC] Pressed Ctrl+Enter')
+          }
+
+          // 5. 等待并提取 AI 回复
+          console.log('[VERIFY_IPC] Waiting for AI response to complete (looking for thumbs up icon)...')
+          let responseText = ''
+
+          try {
+            // 等待点赞图标出现，标志着生成结束
+            const completionSelector = 'button[iconname="thumb_up"], span.material-symbols-outlined:has-text("thumb_up")'
+
+            await page.waitForSelector(completionSelector, {
+              state: 'visible',
+              timeout: 180000 // 最多等待3分钟
+            })
+
+            console.log('[VERIFY_IPC] Completion signal found (thumbs up icon)')
+
+            // 给一点额外时间确保文本完全渲染
+            await page.waitForTimeout(1000)
+
+            // 提取内容
+            const responseSelectors = [
+              '[data-message-author-role="model"]', // 优先尝试明确的模型角色
+              '.model-response',
+              'ms-text-chunk', // 可能是通用的，放在后面
+              '.response-content',
+              '.message-content',
+              '.ai-response',
+              '.markdown-body'
+            ]
+
+            // 滚动到底部以确保加载最新内容
+            try {
+              console.log('[VERIFY_IPC] Scrolling to bottom...')
+              await page.evaluate(() => {
+                window.scrollTo(0, document.body.scrollHeight);
+                // 尝试找到滚动容器并滚动
+                const scrollers = document.querySelectorAll('.infinite-scroll-component, [class*="scroll"], main');
+                scrollers.forEach(el => el.scrollTop = el.scrollHeight);
+              });
+              await page.waitForTimeout(1000)
+            } catch (e) {
+              console.warn('[VERIFY_IPC] Scroll failed:', e)
+            }
+
+            for (const selector of responseSelectors) {
+              try {
+                const elements = await page.locator(selector).all()
+                if (elements.length > 0) {
+                  console.log(`[VERIFY_IPC] Found ${elements.length} elements for selector: ${selector}`)
+
+                  // 遍历所有找到的元素看看内容 (调试用)
+                  for (let i = 0; i < elements.length; i++) {
+                    const elText = await elements[i].innerText()
+                    console.log(`[VERIFY_IPC] Selector ${selector} [${i}]: ${elText.substring(0, 50)}...`)
+                  }
+
+                  // 从最后一个元素开始向前查找有内容的元素
+                  for (let i = elements.length - 1; i >= 0; i--) {
+                    const element = elements[i]
+
+                    // 等待文本内容出现 (对于最后一个元素特别重要，但对于之前的元素可能已经有了)
+                    let text = ''
+                    // 只对最后两个元素尝试等待，避免太慢
+                    const maxAttempts = (i >= elements.length - 2) ? 10 : 1;
+
+                    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+                      text = await element.innerText()
+                      if (text && text.trim().length > 0) {
+                        break
+                      }
+                      if (maxAttempts > 1) {
+                        console.log(`[VERIFY_IPC] Waiting for text in ${selector} index ${i} (attempt ${attempt + 1}/${maxAttempts})...`)
+                        await page.waitForTimeout(500)
+                      }
+                    }
+
+                    if (text && text.trim().length > 0) {
+                      responseText = text
+                      console.log(`[VERIFY_IPC] Selected content from ${selector} (index ${i})`)
+                      // 找到内容后跳出外层循环 (responseSelectors 循环)
+                      // 这里需要设置一个标志位或者直接 return? 
+                      // 现在的结构是在 for(selector) 循环里。
+                      // 我们应该 break 内部循环，并且设置 responseText，外层循环会检测 responseText 长度
+                      break
+                    } else {
+                      console.log(`[VERIFY_IPC] Element found but text is empty for ${selector} index ${i}`)
+                    }
+                  }
+
+                  // 如果找到了内容，跳出 selector 循环
+                  if (responseText.length > 0) {
+                    break
+                  }
+                }
+              } catch (e) {
+                console.log(`[VERIFY_IPC] Error checking selector ${selector}: ${e.message}`)
+                continue
+              }
+            }
+
+          } catch (e) {
+            console.error('[VERIFY_IPC] Timeout waiting for completion signal:', e)
+            // 如果超时，尝试直接提取当前已有的内容
+            // 尝试滚动到底部
+            try {
+              await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight))
+              await page.waitForTimeout(500)
+            } catch (scrollErr) {
+              console.warn('Failed to scroll to bottom:', scrollErr)
+            }
+            responseText = await page.locator('ms-text-chunk').last().innerText().catch(() => '')
+          }
+
+          console.log('[VERIFY_IPC] Final response extracted length:', responseText.length)
+
+          return {
+            success: true,
+            message: 'AI Studio 已打开并获取回复',
+            browserId: browserResult.browserId,
+            aiResponse: responseText
+          }
+
+        } else {
+          console.error('[VERIFY_IPC] Could not find input element')
+          return {
+            success: false,
+            message: '无法找到输入框',
+            browserId: browserResult.browserId
+          }
+        }
+      } catch (error) {
+        console.error('[VERIFY_IPC] Interaction demo failed:', error)
+        return {
+          success: false,
+          message: '交互过程出错: ' + error.message,
+          browserId: browserResult.browserId
+        }
+      }
+      // ===========================
+    } catch (error) {
+      console.error('aistudio:open-browser error:', error)
+      return {
+        success: false,
+        error: error.message
+      }
+    }
+  })
+
+  // ===== 抖音视频采集相关 =====
+
+  ipcMain.handle('douyin:check-chrome', async () => {
+    try {
+      return await douyinService.checkChromeRunning()
+    } catch (error) {
+      console.error('douyin:check-chrome error:', error)
+      return { running: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('douyin:get-profiles', async () => {
+    try {
+      return await douyinService.getChromeProfiles()
+    } catch (error) {
+      console.error('douyin:get-profiles error:', error)
+      return []
+    }
+  })
+
+  ipcMain.handle('douyin:kill-chrome', async () => {
+    try {
+      return await douyinService.killAllChrome()
+    } catch (error) {
+      console.error('douyin:kill-chrome error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('douyin:start-debug-mode', async (event, profileId) => {
+    try {
+      return await douyinService.startChromeDebugMode(profileId)
+    } catch (error) {
+      console.error('douyin:start-debug-mode error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('douyin:launch', async (event, profileId) => {
+    try {
+      return await douyinService.launchBrowser(profileId)
+    } catch (error) {
+      console.error('douyin:launch error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('douyin:open', async () => {
+    try {
+      return await douyinService.openDouyin()
+    } catch (error) {
+      console.error('douyin:open error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('douyin:get-current-video', async () => {
+    try {
+      return await douyinService.getCurrentVideoInfo()
+    } catch (error) {
+      console.error('douyin:get-current-video error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('douyin:scroll-next', async () => {
+    try {
+      return await douyinService.scrollToNext()
+    } catch (error) {
+      console.error('douyin:scroll-next error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('douyin:scroll-prev', async () => {
+    try {
+      return await douyinService.scrollToPrevious()
+    } catch (error) {
+      console.error('douyin:scroll-prev error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('douyin:collect', async (event, count) => {
+    try {
+      return await douyinService.collectVideos(count, (progress) => {
+        mainWindow.webContents.send('douyin:progress', progress)
+      })
+    } catch (error) {
+      console.error('douyin:collect error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('douyin:stop', async () => {
+    try {
+      return douyinService.stopCollection()
+    } catch (error) {
+      console.error('douyin:stop error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('douyin:close', async () => {
+    try {
+      return await douyinService.closeBrowser()
+    } catch (error) {
+      console.error('douyin:close error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('douyin:status', async () => {
+    try {
+      return douyinService.getStatus()
+    } catch (error) {
+      console.error('douyin:status error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('douyin:get-collected', async () => {
+    try {
+      return douyinService.getCollectedVideos()
+    } catch (error) {
+      console.error('douyin:get-collected error:', error)
+      return []
+    }
+  })
+
+  ipcMain.handle('douyin:clear', async () => {
+    try {
+      return douyinService.clearCollectedVideos()
+    } catch (error) {
+      console.error('douyin:clear error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // ===== 定时任务相关 =====
+  const schedulerService = require('./services/scheduler.service')
+
+  ipcMain.handle('scheduler:getConfig', async () => {
+    try {
+      return schedulerService.getConfig()
+    } catch (error) {
+      console.error('scheduler:getConfig error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('scheduler:updateConfig', async (event, config) => {
+    try {
+      return await schedulerService.updateConfig(config)
+    } catch (error) {
+      console.error('scheduler:updateConfig error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('scheduler:enable', async () => {
+    try {
+      return await schedulerService.enable()
+    } catch (error) {
+      console.error('scheduler:enable error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('scheduler:disable', async () => {
+    try {
+      return await schedulerService.disable()
+    } catch (error) {
+      console.error('scheduler:disable error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('scheduler:executeNow', async () => {
+    try {
+      return await schedulerService.executeNow()
+    } catch (error) {
+      console.error('scheduler:executeNow error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('scheduler:getLogs', async (event, limit) => {
+    try {
+      return schedulerService.getLogs(limit)
+    } catch (error) {
+      console.error('scheduler:getLogs error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('scheduler:clearLogs', async () => {
+    try {
+      return await schedulerService.clearLogs()
+    } catch (error) {
+      console.error('scheduler:clearLogs error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('scheduler:getStatus', async () => {
+    try {
+      return schedulerService.getStatus()
+    } catch (error) {
+      console.error('scheduler:getStatus error:', error)
+      throw error
+    }
   })
 
   console.log('IPC handlers initialized')

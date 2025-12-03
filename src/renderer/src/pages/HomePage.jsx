@@ -395,40 +395,38 @@ const HomePage = () => {
           </Text>
         </div>
       ) : (
-        <Collapse defaultActiveKey={profiles.map((p) => p.id.toString())}>
-          {profiles.map((profile) => {
+        <Collapse 
+          defaultActiveKey={profiles.map((p) => p.id.toString())}
+          items={profiles.map((profile) => {
             const videos = accountVideos[profile.id] || []
-            return (
-              <Panel
-                header={
-                  <Space>
-                    <Text strong>{profile.name}</Text>
-                    {profile.remark && <Text type="secondary">({profile.remark})</Text>}
-                    <Tag color="blue">{videos.length} 个视频</Tag>
-                    <Text type="secondary" style={{ fontSize: '12px' }}>
-                      {profile.folder_path}
-                    </Text>
-                  </Space>
-                }
-                key={profile.id}
-                extra={
-                  <Button
-                    size="small"
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      handleGetAccountVideos(profile)
-                    }}
-                    loading={loadingAccounts[profile.id]}
-                  >
-                    获取视频
-                  </Button>
-                }
-              >
-                {renderAccountVideos(profile)}
-              </Panel>
-            )
+            return {
+              key: profile.id,
+              label: (
+                <Space>
+                  <Text strong>{profile.name}</Text>
+                  {profile.remark && <Text type="secondary">({profile.remark})</Text>}
+                  <Tag color="blue">{videos.length} 个视频</Tag>
+                  <Text type="secondary" style={{ fontSize: '12px' }}>
+                    {profile.folder_path}
+                  </Text>
+                </Space>
+              ),
+              extra: (
+                <Button
+                  size="small"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    handleGetAccountVideos(profile)
+                  }}
+                  loading={loadingAccounts[profile.id]}
+                >
+                  获取视频
+                </Button>
+              ),
+              children: renderAccountVideos(profile)
+            }
           })}
-        </Collapse>
+        />
       )}
     </div>
   )

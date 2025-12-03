@@ -88,6 +88,48 @@ class DatabaseService {
       )
     `)
 
+    // 创建 AI Studio 账号表
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS ai_studio_accounts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        bit_browser_id TEXT,
+        browser_type TEXT DEFAULT 'bitbrowser',
+        status TEXT DEFAULT 'active',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `)
+
+    // 迁移：为 ai_studio_accounts 添加 browser_type 字段
+    this.migrateAIStudioAccounts()
+
+    // 创建解说词任务表
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS commentary_tasks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        filters TEXT,
+        status TEXT DEFAULT 'pending',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `)
+
+    // 创建解说词任务项表
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS commentary_task_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER NOT NULL,
+        video_id TEXT NOT NULL,
+        video_info TEXT,
+        status TEXT DEFAULT 'pending',
+        result TEXT,
+        error TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (task_id) REFERENCES commentary_tasks (id)
+      )
+    `)
+
     // 迁移：为 browser_profiles 表添加新字段
     this.migrateBrowserProfiles()
 
@@ -120,6 +162,23 @@ class DatabaseService {
     if (!columnNames.includes('default_tags')) {
       this.db.exec('ALTER TABLE browser_profiles ADD COLUMN default_tags TEXT')
       console.log('Added default_tags column to browser_profiles')
+    }
+
+    // 添加 status 字段
+    if (!columnNames.includes('status')) {
+      this.db.exec("ALTER TABLE browser_profiles ADD COLUMN status TEXT DEFAULT 'active'")
+      console.log('Added status column to browser_profiles')
+    }
+  }
+
+  migrateAIStudioAccounts() {
+    const columns = this.db.pragma('table_info(ai_studio_accounts)')
+    const columnNames = columns.map(col => col.name)
+
+    // 添加 browser_type 字段
+    if (!columnNames.includes('browser_type')) {
+      this.db.exec("ALTER TABLE ai_studio_accounts ADD COLUMN browser_type TEXT DEFAULT 'bitbrowser'")
+      console.log('Added browser_type column to ai_studio_accounts')
     }
   }
 
@@ -249,6 +308,128 @@ class DatabaseService {
     })
 
     return transaction(profiles)
+  }
+
+  // ===== AI Studio 账号相关方法 =====
+
+  createAIStudioAccount(account) {
+    const stmt = this.db.prepare(`
+      INSERT INTO ai_studio_accounts (
+        name, bit_browser_id, browser_type, status
+      ) VALUES (?, ?, ?, ?)
+    `)
+
+    const info = stmt.run(
+      account.name,
+      account.bitBrowserId || null,
+      account.browserType || 'bitbrowser',
+      account.status || 'active'
+    )
+
+    return info.lastInsertRowid
+  }
+
+  getAIStudioAccounts() {
+    return this.db.prepare('SELECT * FROM ai_studio_accounts ORDER BY created_at DESC').all()
+  }
+
+  updateAIStudioAccount(id, updates) {
+    const fields = Object.keys(updates).map(key => {
+      const snakeKey = key.replace(/([A-Z])/g, '_$1').toLowerCase()
+      return `${snakeKey} = ?`
+    }).join(', ')
+
+    const values = Object.values(updates)
+    values.push(id)
+
+    return this.db.prepare(`
+      UPDATE ai_studio_accounts SET ${fields} WHERE id = ?
+    `).run(...values)
+  }
+
+  deleteAIStudioAccount(id) {
+    return this.db.prepare('DELETE FROM ai_studio_accounts WHERE id = ?').run(id)
+  }
+
+  // ===== 解说词任务相关方法 =====
+
+  createCommentaryTask(task) {
+    const stmt = this.db.prepare(`
+      INSERT INTO commentary_tasks (
+        name, filters, status
+      ) VALUES (?, ?, ?)
+    `)
+
+    const info = stmt.run(
+      task.name,
+      JSON.stringify(task.filters || {}),
+      task.status || 'pending'
+    )
+
+    return info.lastInsertRowid
+  }
+
+  getCommentaryTasks() {
+    const tasks = this.db.prepare('SELECT * FROM commentary_tasks ORDER BY created_at DESC').all()
+    return tasks.map(task => ({
+      ...task,
+      filters: JSON.parse(task.filters || '{}')
+    }))
+  }
+
+  getCommentaryTaskById(id) {
+    const task = this.db.prepare('SELECT * FROM commentary_tasks WHERE id = ?').get(id)
+    if (task) {
+      task.filters = JSON.parse(task.filters || '{}')
+    }
+    return task
+  }
+
+  updateCommentaryTaskStatus(id, status) {
+    return this.db.prepare('UPDATE commentary_tasks SET status = ? WHERE id = ?').run(status, id)
+  }
+
+  deleteCommentaryTask(id) {
+    // 级联删除任务项
+    this.db.prepare('DELETE FROM commentary_task_items WHERE task_id = ?').run(id)
+    return this.db.prepare('DELETE FROM commentary_tasks WHERE id = ?').run(id)
+  }
+
+  addCommentaryTaskItems(taskId, items) {
+    const stmt = this.db.prepare(`
+      INSERT INTO commentary_task_items (
+        task_id, video_id, video_info, status
+      ) VALUES (?, ?, ?, ?)
+    `)
+
+    const transaction = this.db.transaction((items) => {
+      for (const item of items) {
+        stmt.run(
+          taskId,
+          item.video_id || item.id, // 兼容不同字段名
+          JSON.stringify(item),
+          'pending'
+        )
+      }
+    })
+
+    return transaction(items)
+  }
+
+  getCommentaryTaskItems(taskId) {
+    const items = this.db.prepare('SELECT * FROM commentary_task_items WHERE task_id = ? ORDER BY id ASC').all(taskId)
+    return items.map(item => ({
+      ...item,
+      video_info: JSON.parse(item.video_info || '{}')
+    }))
+  }
+
+  updateCommentaryTaskItemStatus(id, status, result = null, error = null) {
+    return this.db.prepare(`
+      UPDATE commentary_task_items 
+      SET status = ?, result = ?, error = ?, updated_at = CURRENT_TIMESTAMP 
+      WHERE id = ?
+    `).run(status, result ? JSON.stringify(result) : null, error, id)
   }
 
   // ===== 设置相关方法 =====

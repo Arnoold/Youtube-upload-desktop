@@ -14,8 +14,14 @@ function copyFilesPlugin() {
         { from: 'src/main/services/database.service.js', to: 'dist-electron/main/services/database.service.js' },
         { from: 'src/main/services/file.service.js', to: 'dist-electron/main/services/file.service.js' },
         { from: 'src/main/services/bitbrowser.service.js', to: 'dist-electron/main/services/bitbrowser.service.js' },
+        { from: 'src/main/services/hubstudio.service.js', to: 'dist-electron/main/services/hubstudio.service.js' },
         { from: 'src/main/services/playwright.service.js', to: 'dist-electron/main/services/playwright.service.js' },
-        { from: 'src/main/services/upload.service.js', to: 'dist-electron/main/services/upload.service.js' }
+        { from: 'src/main/services/upload.service.js', to: 'dist-electron/main/services/upload.service.js' },
+        { from: 'src/main/services/supabase.service.js', to: 'dist-electron/main/services/supabase.service.js' },
+        { from: 'src/main/services/aistudio.service.js', to: 'dist-electron/main/services/aistudio.service.js' },
+        { from: 'src/main/services/clipboard-lock.service.js', to: 'dist-electron/main/services/clipboard-lock.service.js' },
+        { from: 'src/main/services/douyin.service.js', to: 'dist-electron/main/services/douyin.service.js' },
+        { from: 'src/main/services/scheduler.service.js', to: 'dist-electron/main/services/scheduler.service.js' }
       ]
 
       filesToCopy.forEach(({ from, to }) => {

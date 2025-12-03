@@ -1,18 +1,39 @@
-const { app, BrowserWindow } = require('electron')
+const { app, BrowserWindow, ipcMain, dialog } = require('electron')
 const path = require('path')
 const { setupIPC } = require('./ipc-handlers')
+const fs = require('fs')
+
+
+// 设置 NO_PROXY 环境变量，强制 localhost 不走代理
+process.env.NO_PROXY = [
+  process.env.NO_PROXY,
+  '127.0.0.1',
+  'localhost'
+].filter(Boolean).join(',')
 
 // 导入服务
 const DatabaseService = require('./services/database.service')
 const FileService = require('./services/file.service')
 const BitBrowserService = require('./services/bitbrowser.service')
+const HubStudioService = require('./services/hubstudio.service')
 const PlaywrightService = require('./services/playwright.service')
 const UploadService = require('./services/upload.service')
 
 let mainWindow = null
 let services = {}
 
+const LOG_PATH = 'd:\\Youtube-upload-desktop\\debug_ipc.log'
+
+function log(msg) {
+  try {
+    fs.appendFileSync(LOG_PATH, `[${new Date().toISOString()}] ${msg}\n`)
+  } catch (e) {
+    console.error('Failed to write log:', e)
+  }
+}
+
 function createWindow() {
+  log('createWindow: Creating browser window...')
   // 创建浏览器窗口
   mainWindow = new BrowserWindow({
     width: 1200,
@@ -20,7 +41,8 @@ function createWindow() {
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
       nodeIntegration: false,
-      contextIsolation: true
+      contextIsolation: true,
+      sandbox: false
     }
   })
 
@@ -41,50 +63,131 @@ function createWindow() {
   mainWindow.on('closed', () => {
     mainWindow = null
   })
+  log('createWindow: Browser window created.')
 }
 
 async function initializeServices() {
   try {
+    log('initializeServices: Starting...')
     console.log('Initializing services...')
 
     // 初始化数据库
+    log('initializeServices: Creating DatabaseService...')
     const dbService = new DatabaseService()
+    log('initializeServices: Initializing DatabaseService...')
     await dbService.initialize()
+    log('initializeServices: DatabaseService initialized.')
 
     // 初始化其他服务
+    log('initializeServices: Creating other services...')
     const fileService = new FileService()
     const bitBrowserService = new BitBrowserService()
+    const hubStudioService = new HubStudioService()
     const playwrightService = new PlaywrightService()
     const uploadService = new UploadService(dbService, bitBrowserService, playwrightService)
+
+    log('initializeServices: Requiring Supabase/AIStudio services...')
+    const supabaseService = require('./services/supabase.service')
+    const aiStudioService = require('./services/aistudio.service')
+
+    // 注入 dbService 和浏览器服务
+    aiStudioService.setDbService(dbService)
+    aiStudioService.setBitBrowserService(bitBrowserService)
+    aiStudioService.setHubStudioService(hubStudioService)
+
+    // 尝试自动连接 Supabase
+    try {
+      const supabaseUrl = dbService.getSetting('supabase_url')
+      const supabaseKey = dbService.getSetting('supabase_api_key')
+      const supabaseTable = dbService.getSetting('supabase_table')
+
+      if (supabaseUrl && supabaseKey) {
+        log('initializeServices: Auto-connecting Supabase...')
+        console.log('Auto-connecting to Supabase...')
+        supabaseService.initialize(supabaseUrl, supabaseKey)
+        if (supabaseTable) {
+          supabaseService.setTableName(supabaseTable)
+        }
+        console.log('Supabase auto-connected')
+      }
+    } catch (error) {
+      log(`initializeServices: Supabase auto-connect failed: ${error.message}`)
+      console.error('Supabase auto-connect failed:', error)
+    }
+
+    // 尝试自动加载 HubStudio 凭证
+    try {
+      const hubstudioAppId = dbService.getSetting('hubstudio_app_id')
+      const hubstudioAppSecret = dbService.getSetting('hubstudio_app_secret')
+      const hubstudioGroupCode = dbService.getSetting('hubstudio_group_code')
+
+      if (hubstudioAppId && hubstudioAppSecret) {
+        log('initializeServices: Auto-loading HubStudio credentials...')
+        console.log('Auto-loading HubStudio credentials...')
+        hubStudioService.setCredentials(hubstudioAppId, hubstudioAppSecret, hubstudioGroupCode || '')
+        console.log('HubStudio credentials loaded')
+      }
+    } catch (error) {
+      log(`initializeServices: HubStudio credentials load failed: ${error.message}`)
+      console.error('HubStudio credentials load failed:', error)
+    }
 
     services = {
       dbService,
       fileService,
       bitBrowserService,
+      hubStudioService,
       playwrightService,
-      uploadService
+      uploadService,
+      supabaseService,
+      aiStudioService
     }
-
-    console.log('All services initialized successfully')
-
-    // 设置 IPC 处理程序
-    setupIPC(mainWindow, services)
-
-    return true
+    log('initializeServices: Completed. Services object created.')
   } catch (error) {
-    console.error('Failed to initialize services:', error)
+    log(`initializeServices: FATAL ERROR: ${error.message}\n${error.stack}`)
+    console.error('Service initialization failed:', error)
     throw error
   }
 }
 
 // 当 Electron 完成初始化时
 app.whenReady().then(async () => {
-  createWindow()
+  log('app.whenReady: Started.')
+
 
   try {
+    log('app.whenReady: Calling initializeServices...')
     await initializeServices()
+    log('app.whenReady: initializeServices returned.')
   } catch (error) {
+    log(`app.whenReady: Initialization error: ${error.message}`)
     console.error('Initialization error:', error)
+  }
+
+  log('app.whenReady: Calling createWindow...')
+  createWindow()
+
+  if (mainWindow) {
+    log('app.whenReady: Calling setupIPC...')
+    try {
+      log(`app.whenReady: Services keys: ${Object.keys(services || {}).join(', ')}`)
+    } catch (e) { }
+
+    setupIPC(mainWindow, services)
+    log('app.whenReady: setupIPC returned.')
+
+    // 初始化定时任务服务
+    log('app.whenReady: Initializing scheduler service...')
+    try {
+      const schedulerService = require('./services/scheduler.service')
+      schedulerService.init(services, mainWindow)
+      log('app.whenReady: Scheduler service initialized.')
+    } catch (error) {
+      log(`app.whenReady: Scheduler init error: ${error.message}`)
+      console.error('Scheduler initialization error:', error)
+    }
+  } else {
+    log('app.whenReady: mainWindow is null!')
   }
 
   app.on('activate', () => {
@@ -105,6 +208,7 @@ app.on('window-all-closed', () => {
 // 应用退出前的清理
 app.on('before-quit', () => {
   console.log('Cleaning up before quit...')
+  log('app: before-quit')
 
   if (services.fileService) {
     services.fileService.closeAll()
@@ -121,9 +225,11 @@ app.on('before-quit', () => {
 
 // 捕获未处理的异常
 process.on('uncaughtException', (error) => {
+  log(`Uncaught exception: ${error.message}\n${error.stack}`)
   console.error('Uncaught exception:', error)
 })
 
 process.on('unhandledRejection', (error) => {
+  log(`Unhandled rejection: ${error.message}\n${error.stack}`)
   console.error('Unhandled rejection:', error)
 })

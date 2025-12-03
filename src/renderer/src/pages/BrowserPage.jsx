@@ -136,21 +136,43 @@ const BrowserPage = () => {
       const bitBrowserResult = await window.electron.browser.list()
       const bitBrowserProfiles = bitBrowserResult?.data?.list || []
 
-      // 合并数据：将数据库配置与比特浏览器状态匹配
-      const mergedProfiles = dbProfiles.map((dbProfile) => {
-        // 根据 bit_browser_id 查找对应的比特浏览器配置
-        const bitProfile = bitBrowserProfiles.find(
-          (bp) => bp.id === dbProfile.bit_browser_id
-        )
+      // 合并数据并检查运行状态
+      const mergedProfiles = await Promise.all(
+        dbProfiles.map(async (dbProfile) => {
+          // 根据 bit_browser_id 查找对应的比特浏览器配置
+          const bitProfile = bitBrowserProfiles.find(
+            (bp) => bp.id === dbProfile.bit_browser_id
+          )
 
-        return {
-          ...dbProfile,
-          // 添加比特浏览器的额外信息
-          remark: bitProfile?.remark || '',
-          proxyType: bitProfile?.proxyType || '',
-          browserStatus: bitProfile ? 'active' : 'not_found'
-        }
-      })
+          // 检查浏览器是否正在运行
+          let isRunning = false
+          if (bitProfile) {
+            try {
+              const statusResult = await window.electron.browser.checkStatus(dbProfile.bit_browser_id)
+              console.log(`Browser ${dbProfile.name} (${dbProfile.bit_browser_id}) status:`, statusResult)
+
+              // 比特浏览器 API 可能返回的格式：
+              // { success: true, data: { status: 'Active' } } 或
+              // { data: { status: 'Active' } } 或
+              // { status: 'Active' }
+              isRunning = statusResult?.data?.status === 'Active' ||
+                         statusResult?.status === 'Active' ||
+                         statusResult?.data?.status === 'active'
+            } catch (error) {
+              console.error('Failed to check browser status:', error)
+            }
+          }
+
+          return {
+            ...dbProfile,
+            // 添加比特浏览器的额外信息
+            remark: bitProfile?.remark || '',
+            proxyType: bitProfile?.proxyType || '',
+            browserStatus: bitProfile ? 'active' : 'not_found',
+            isRunning: isRunning
+          }
+        })
+      )
 
       console.log('BrowserPage - 合并后的账号列表:', mergedProfiles)
       setProfiles(mergedProfiles)
@@ -288,7 +310,7 @@ const BrowserPage = () => {
       ellipsis: true
     },
     {
-      title: '状态',
+      title: '配置状态',
       dataIndex: 'browserStatus',
       key: 'browserStatus',
       width: 100,
@@ -299,6 +321,22 @@ const BrowserPage = () => {
           return <Typography.Text type="danger">✗ 未找到</Typography.Text>
         }
         return <Typography.Text type="warning">? 未知</Typography.Text>
+      }
+    },
+    {
+      title: '运行状态',
+      dataIndex: 'isRunning',
+      key: 'isRunning',
+      width: 100,
+      render: (isRunning, record) => {
+        if (record.browserStatus === 'not_found') {
+          return <Typography.Text type="secondary">-</Typography.Text>
+        }
+        if (isRunning) {
+          return <Typography.Text type="success">● 运行中</Typography.Text>
+        } else {
+          return <Typography.Text type="secondary">○ 已关闭</Typography.Text>
+        }
       }
     },
     {

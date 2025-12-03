@@ -4,6 +4,10 @@ class BitBrowserService {
   constructor() {
     // 比特浏览器默认API地址
     this.apiUrl = 'http://127.0.0.1:54345'
+    // 创建 axios 实例，禁用代理，防止系统代理干扰本地连接
+    this.client = axios.create({
+      proxy: false
+    })
   }
 
   /**
@@ -21,8 +25,9 @@ class BitBrowserService {
    */
   async testConnection() {
     try {
+      console.log(`Testing connection to ${this.apiUrl}/browser/list...`)
       // 比特浏览器API需要分页参数
-      const response = await axios.post(`${this.apiUrl}/browser/list`, {
+      const response = await this.client.post(`${this.apiUrl}/browser/list`, {
         page: 0,
         pageSize: 10
       }, {
@@ -36,11 +41,23 @@ class BitBrowserService {
       }
     } catch (error) {
       console.error('BitBrowser connection test failed:', error.message)
+      console.error('Full error details:', {
+        code: error.code,
+        address: error.address,
+        port: error.port,
+        response: error.response?.data
+      })
+
+      let message = error.message
+      if (error.code === 'ECONNREFUSED') {
+        message = `无法连接到 ${this.apiUrl}，请检查比特浏览器是否启动且端口正确`
+      } else if (error.code === 'ETIMEDOUT') {
+        message = `连接超时，请检查比特浏览器是否卡顿`
+      }
+
       return {
         success: false,
-        message: error.code === 'ECONNREFUSED'
-          ? '无法连接到比特浏览器，请确保比特浏览器已启动'
-          : error.message,
+        message: message,
         error: error.message
       }
     }
@@ -53,7 +70,7 @@ class BitBrowserService {
   async getProfiles() {
     try {
       // 比特浏览器API需要分页参数
-      const response = await axios.post(`${this.apiUrl}/browser/list`, {
+      const response = await this.client.post(`${this.apiUrl}/browser/list`, {
         page: 0,
         pageSize: 100
       })
@@ -83,7 +100,7 @@ class BitBrowserService {
         fingerprint: config.fingerprint || {}
       }
 
-      const response = await axios.post(`${this.apiUrl}/browser/update`, payload)
+      const response = await this.client.post(`${this.apiUrl}/browser/update`, payload)
       console.log('Browser profile created:', response.data)
       return response.data
     } catch (error) {
@@ -101,7 +118,7 @@ class BitBrowserService {
     try {
       console.log('Starting browser with profile ID:', profileId)
 
-      const response = await axios.post(`${this.apiUrl}/browser/open`, {
+      const response = await this.client.post(`${this.apiUrl}/browser/open`, {
         id: profileId,
         loadExtensions: false,
         args: [],
@@ -110,12 +127,38 @@ class BitBrowserService {
 
       if (response.data.success) {
         const browserData = response.data.data
-        console.log('Browser started successfully:', browserData.browserId)
+        console.log('BitBrowser start response:', JSON.stringify(response.data, null, 2))
+
+        // 尝试获取 WebSocket 地址
+        let wsEndpoint = ''
+        if (browserData.ws) {
+          if (typeof browserData.ws === 'string') {
+            wsEndpoint = browserData.ws
+          } else {
+            wsEndpoint = browserData.ws.playwright || browserData.ws.puppeteer || ''
+          }
+        }
+
+        // 如果没有获取到 WS 地址，但有 HTTP 调试地址，尝试从 HTTP 接口获取
+        if (!wsEndpoint && browserData.http) {
+          try {
+            console.log(`Fetching WS URL from http://${browserData.http}/json/version...`)
+            const versionResponse = await this.client.get(`http://${browserData.http}/json/version`)
+            if (versionResponse.data && versionResponse.data.webSocketDebuggerUrl) {
+              wsEndpoint = versionResponse.data.webSocketDebuggerUrl
+              console.log('Fetched WS URL from /json/version:', wsEndpoint)
+            }
+          } catch (err) {
+            console.error('Failed to fetch WS URL from /json/version:', err.message)
+          }
+        }
+
+        console.log('Extracted wsEndpoint:', wsEndpoint)
 
         return {
           success: true,
-          browserId: browserData.browserId,
-          wsEndpoint: browserData.ws?.playwright || browserData.ws?.puppeteer,
+          browserId: browserData.browserId || browserData.id, // 兼容不同字段名
+          wsEndpoint: wsEndpoint,
           http: browserData.http,
           webdriver: browserData.webdriver
         }
@@ -137,7 +180,7 @@ class BitBrowserService {
     try {
       console.log('Closing browser:', browserId)
 
-      const response = await axios.post(`${this.apiUrl}/browser/close`, {
+      const response = await this.client.post(`${this.apiUrl}/browser/close`, {
         id: browserId
       })
 
@@ -157,7 +200,7 @@ class BitBrowserService {
    */
   async deleteProfile(profileId) {
     try {
-      const response = await axios.post(`${this.apiUrl}/browser/delete`, {
+      const response = await this.client.post(`${this.apiUrl}/browser/delete`, {
         id: profileId
       })
       console.log('Browser profile deleted:', profileId)
@@ -181,7 +224,7 @@ class BitBrowserService {
         ...config
       }
 
-      const response = await axios.post(`${this.apiUrl}/browser/update`, payload)
+      const response = await this.client.post(`${this.apiUrl}/browser/update`, payload)
       console.log('Browser profile updated:', profileId)
       return response.data
     } catch (error) {
@@ -197,7 +240,7 @@ class BitBrowserService {
    */
   async checkBrowserStatus(browserId) {
     try {
-      const response = await axios.post(`${this.apiUrl}/browser/status`, {
+      const response = await this.client.post(`${this.apiUrl}/browser/status`, {
         id: browserId
       })
       return response.data
