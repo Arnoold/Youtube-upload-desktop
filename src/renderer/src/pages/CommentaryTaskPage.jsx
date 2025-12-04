@@ -365,6 +365,7 @@ const CreateTaskView = ({ onTaskCreated }) => {
 const TaskExecutionView = ({ taskId, onBack }) => {
     const [task, setTask] = useState(null)
     const [items, setItems] = useState([])
+    const [stats, setStats] = useState({ total: 0, completed: 0, failed: 0, pending: 0, processing: 0 })
     const [loading, setLoading] = useState(false)
     const [browserProfiles, setBrowserProfiles] = useState([])
     const [selectedProfiles, setSelectedProfiles] = useState([]) // 改为数组，支持多选
@@ -421,8 +422,7 @@ const TaskExecutionView = ({ taskId, onBack }) => {
     const loadTaskAndItems = async () => {
         setLoading(true)
         try {
-            const taskInfo = await window.electron.db.getCommentaryTaskById(taskId) // Need to ensure this API exists or use getTasks and find
-            // Fallback if getCommentaryTaskById doesn't exist yet, use getCommentaryTasks
+            const taskInfo = await window.electron.db.getCommentaryTaskById(taskId)
             if (!taskInfo) {
                 const tasks = await window.electron.db.getCommentaryTasks()
                 const found = tasks.find(t => t.id === taskId)
@@ -433,6 +433,10 @@ const TaskExecutionView = ({ taskId, onBack }) => {
 
             const list = await window.electron.db.getCommentaryTaskItems(taskId)
             setItems(list)
+
+            // 加载统计信息
+            const taskStats = await window.electron.db.getCommentaryTaskStats(taskId)
+            setStats(taskStats)
         } catch (error) {
             message.error('加载任务详情失败')
         } finally {
@@ -621,6 +625,71 @@ const TaskExecutionView = ({ taskId, onBack }) => {
                 </Space>
             }
         >
+            {/* 执行进度统计卡片 */}
+            <Card size="small" style={{ marginBottom: 16 }}>
+                <Row gutter={16} align="middle">
+                    <Col flex="auto">
+                        <Space size="large" wrap>
+                            <div style={{ textAlign: 'center' }}>
+                                <div style={{ fontSize: 24, fontWeight: 'bold', color: '#1890ff' }}>{stats.total}</div>
+                                <div style={{ fontSize: 12, color: '#666' }}>总计</div>
+                            </div>
+                            <div style={{ textAlign: 'center' }}>
+                                <div style={{ fontSize: 24, fontWeight: 'bold', color: '#52c41a' }}>{stats.completed}</div>
+                                <div style={{ fontSize: 12, color: '#666' }}>成功</div>
+                            </div>
+                            <div style={{ textAlign: 'center' }}>
+                                <div style={{ fontSize: 24, fontWeight: 'bold', color: '#ff4d4f' }}>{stats.failed}</div>
+                                <div style={{ fontSize: 12, color: '#666' }}>失败</div>
+                            </div>
+                            <div style={{ textAlign: 'center' }}>
+                                <div style={{ fontSize: 24, fontWeight: 'bold', color: '#faad14' }}>{stats.processing}</div>
+                                <div style={{ fontSize: 12, color: '#666' }}>执行中</div>
+                            </div>
+                            <div style={{ textAlign: 'center' }}>
+                                <div style={{ fontSize: 24, fontWeight: 'bold', color: '#8c8c8c' }}>{stats.pending}</div>
+                                <div style={{ fontSize: 12, color: '#666' }}>待执行</div>
+                            </div>
+                            {/* 时间信息 */}
+                            <Divider type="vertical" style={{ height: 40 }} />
+                            <div style={{ textAlign: 'left', fontSize: 12 }}>
+                                {task?.started_at ? (
+                                    <>
+                                        <div><Text type="secondary">开始:</Text> {dayjs(task.started_at).format('MM-DD HH:mm:ss')}</div>
+                                        {task?.finished_at ? (
+                                            <>
+                                                <div><Text type="secondary">结束:</Text> {dayjs(task.finished_at).format('MM-DD HH:mm:ss')}</div>
+                                                <div>
+                                                    <Text type="success">
+                                                        耗时: {(() => {
+                                                            const diff = dayjs(task.finished_at).diff(dayjs(task.started_at), 'second')
+                                                            if (diff < 60) return `${diff}秒`
+                                                            if (diff < 3600) return `${Math.floor(diff / 60)}分${diff % 60}秒`
+                                                            return `${Math.floor(diff / 3600)}时${Math.floor((diff % 3600) / 60)}分`
+                                                        })()}
+                                                    </Text>
+                                                </div>
+                                            </>
+                                        ) : (
+                                            <div><Text type="warning">执行中...</Text></div>
+                                        )}
+                                    </>
+                                ) : (
+                                    <Text type="secondary">未开始执行</Text>
+                                )}
+                            </div>
+                        </Space>
+                    </Col>
+                    <Col flex="300px">
+                        <Progress
+                            percent={stats.total > 0 ? Math.round((stats.completed / stats.total) * 100) : 0}
+                            status={stats.failed > 0 ? 'exception' : (stats.completed === stats.total && stats.total > 0 ? 'success' : 'active')}
+                            format={() => `${stats.completed}/${stats.total} (${stats.total > 0 ? Math.round((stats.completed / stats.total) * 100) : 0}%)`}
+                        />
+                    </Col>
+                </Row>
+            </Card>
+
             <div style={{ marginBottom: 16, background: '#f5f5f5', padding: 16, borderRadius: 8 }}>
                 <Space wrap>
                     <Button
@@ -639,9 +708,10 @@ const TaskExecutionView = ({ taskId, onBack }) => {
                         icon={<PlayCircleOutlined />}
                         onClick={handleStart}
                         loading={processing}
-                        disabled={selectedProfiles.length === 0}
+                        disabled={selectedProfiles.length === 0 || stats.pending === 0}
                     >
                         {selectedProfiles.length > 1 ? `并行执行 (${selectedProfiles.length}个浏览器)` : '开始执行'}
+                        {stats.pending > 0 && ` - 剩余${stats.pending}条`}
                     </Button>
                     {processing && <Button danger icon={<StopOutlined />} onClick={handleStop}>停止</Button>}
                     <Button icon={<ReloadOutlined />} onClick={loadTaskAndItems}>刷新列表</Button>
@@ -798,7 +868,7 @@ const HistoryTab = ({ onLoadTask, isActive }) => {
     const loadTasks = async () => {
         setLoading(true)
         try {
-            const list = await window.electron.db.getCommentaryTasks()
+            const list = await window.electron.db.getCommentaryTasksWithStats()
             setTasks(list)
         } catch (error) {
             message.error('加载任务列表失败')
@@ -819,21 +889,91 @@ const HistoryTab = ({ onLoadTask, isActive }) => {
 
     const columns = [
         { title: 'ID', dataIndex: 'id', width: 60, render: (id) => id ? Math.floor(id) : '-' },
-        { title: '任务名称', dataIndex: 'name' },
+        { title: '任务名称', dataIndex: 'name', ellipsis: true },
+        {
+            title: '执行进度',
+            key: 'progress',
+            width: 280,
+            render: (_, record) => {
+                const stats = record.stats || { total: 0, completed: 0, failed: 0, pending: 0, processing: 0 }
+                const progressPercent = stats.total > 0 ? Math.round((stats.completed / stats.total) * 100) : 0
+                return (
+                    <div>
+                        <div style={{ display: 'flex', gap: 8, marginBottom: 4, flexWrap: 'wrap' }}>
+                            <Tag>总计: {stats.total}</Tag>
+                            <Tag color="success">成功: {stats.completed}</Tag>
+                            <Tag color="error">失败: {stats.failed}</Tag>
+                            <Tag color="default">待执行: {stats.pending}</Tag>
+                            {stats.processing > 0 && <Tag color="processing">执行中: {stats.processing}</Tag>}
+                        </div>
+                        <Progress
+                            percent={progressPercent}
+                            size="small"
+                            status={stats.failed > 0 ? 'exception' : (progressPercent === 100 ? 'success' : 'active')}
+                            format={() => `${stats.completed}/${stats.total}`}
+                        />
+                    </div>
+                )
+            }
+        },
         {
             title: '状态',
             dataIndex: 'status',
-            width: 100,
+            width: 80,
             render: s => {
                 const color = STATUS_COLOR_MAP[s] || 'default'
                 return <Tag color={color}>{STATUS_MAP[s] || s}</Tag>
             }
         },
-        { title: '创建时间', dataIndex: 'created_at', width: 180, render: d => dayjs(d).format('YYYY-MM-DD HH:mm:ss') },
+        {
+            title: '执行时间',
+            key: 'time',
+            width: 200,
+            render: (_, record) => {
+                const started = record.started_at ? dayjs(record.started_at) : null
+                const finished = record.finished_at ? dayjs(record.finished_at) : null
+
+                // 计算耗时
+                let duration = null
+                if (started && finished) {
+                    const diff = finished.diff(started, 'second')
+                    if (diff < 60) {
+                        duration = `${diff}秒`
+                    } else if (diff < 3600) {
+                        duration = `${Math.floor(diff / 60)}分${diff % 60}秒`
+                    } else {
+                        const hours = Math.floor(diff / 3600)
+                        const mins = Math.floor((diff % 3600) / 60)
+                        duration = `${hours}时${mins}分`
+                    }
+                }
+
+                return (
+                    <div style={{ fontSize: 12 }}>
+                        {started ? (
+                            <>
+                                <div><Text type="secondary">开始:</Text> {started.format('MM-DD HH:mm')}</div>
+                                {finished ? (
+                                    <>
+                                        <div><Text type="secondary">结束:</Text> {finished.format('MM-DD HH:mm')}</div>
+                                        <div><Text type="success">耗时: {duration}</Text></div>
+                                    </>
+                                ) : (
+                                    <div><Text type="warning">执行中...</Text></div>
+                                )}
+                            </>
+                        ) : (
+                            <Text type="secondary">未开始</Text>
+                        )}
+                    </div>
+                )
+            }
+        },
+        { title: '创建时间', dataIndex: 'created_at', width: 130, render: d => dayjs(d).format('MM-DD HH:mm') },
         {
             title: '操作',
             key: 'action',
-            width: 200,
+            width: 160,
             render: (_, record) => (
                 <Space>
                     <Button type="primary" size="small" icon={<EyeOutlined />} onClick={() => onLoadTask(record.id)}>
@@ -848,7 +988,7 @@ const HistoryTab = ({ onLoadTask, isActive }) => {
     ]
 
     return (
-        <Card title="历史任务记录 (仅显示概要)">
+        <Card title="历史任务记录">
             <div style={{ marginBottom: 16, textAlign: 'right' }}>
                 <Button icon={<ReloadOutlined />} onClick={loadTasks}>刷新</Button>
             </div>

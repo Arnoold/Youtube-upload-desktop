@@ -71,8 +71,10 @@ contextBridge.exposeInMainWorld('electron', {
     // 解说词任务
     createCommentaryTask: (task) => ipcRenderer.invoke('db:create-commentary-task', task),
     getCommentaryTasks: () => ipcRenderer.invoke('db:get-commentary-tasks'),
+    getCommentaryTasksWithStats: () => ipcRenderer.invoke('db:get-commentary-tasks-with-stats'),
     getCommentaryTaskById: (id) => ipcRenderer.invoke('db:get-commentary-task-by-id', id),
     getCommentaryTaskItems: (taskId) => ipcRenderer.invoke('db:get-commentary-task-items', taskId),
+    getCommentaryTaskStats: (taskId) => ipcRenderer.invoke('db:get-commentary-task-stats', taskId),
     deleteCommentaryTask: (id) => ipcRenderer.invoke('db:delete-commentary-task', id),
 
     getSetting: (key) => ipcRenderer.invoke('db:get-setting', key),

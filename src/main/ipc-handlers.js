@@ -1,19 +1,24 @@
 function setupIPC(mainWindow, services) {
   const fs = require('fs')
   const path = require('path')
-  const logPath = path.join(process.cwd(), 'debug_ipc.log')
+  // 使用动态路径，基于当前文件所在目录
+  const logPath = path.join(__dirname, '../../debug_ipc.log')
 
-  try {
-    fs.appendFileSync(logPath, `[${new Date().toISOString()}] setupIPC called\n`)
-    fs.appendFileSync(logPath, `[${new Date().toISOString()}] Services keys: ${Object.keys(services || {}).join(', ')}\n`)
-  } catch (e) { console.error(e) }
+  const safeLog = (msg) => {
+    try {
+      fs.appendFileSync(logPath, `[${new Date().toISOString()}] ${msg}\n`)
+    } catch (e) {
+      // 静默忽略
+    }
+  }
+
+  safeLog('setupIPC called')
+  safeLog(`Services keys: ${Object.keys(services || {}).join(', ')}`)
 
   // 延迟加载 electron 和服务，避免模块加载顺序问题
   const { ipcMain, dialog } = require('electron')
 
-  try {
-    fs.appendFileSync(logPath, `[${new Date().toISOString()}] Requiring services...\n`)
-  } catch (e) { }
+  safeLog('Requiring services...')
 
   const supabaseService = require('./services/supabase.service')
   const aiStudioService = require('./services/aistudio.service')
@@ -299,6 +304,24 @@ function setupIPC(mainWindow, services) {
       return dbService.getCommentaryTasks()
     } catch (error) {
       console.error('db:get-commentary-tasks error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('db:get-commentary-tasks-with-stats', async () => {
+    try {
+      return dbService.getCommentaryTasksWithStats()
+    } catch (error) {
+      console.error('db:get-commentary-tasks-with-stats error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('db:get-commentary-task-stats', async (event, taskId) => {
+    try {
+      return dbService.getCommentaryTaskStats(taskId)
+    } catch (error) {
+      console.error('db:get-commentary-task-stats error:', error)
       throw error
     }
   })
@@ -764,41 +787,137 @@ function setupIPC(mainWindow, services) {
           // 增加随机等待，模拟人类思考/检查
           await page.waitForTimeout(2000 + Math.random() * 1000)
 
-          // 方法A: 尝试点击 Run 按钮
+          // 发送 - 增强版：多重验证和重试机制
+          // 基于实际 HTML 结构优化的选择器（按优先级排序）
           const runButtonSelectors = [
-            'button:has-text("Run")',
+            // 最精确：ms-run-button 组件内的 button
+            'ms-run-button button.run-button',
+            'ms-run-button button[aria-label="Run"]',
+            'ms-run-button button[type="submit"]',
+            // 次精确：class 和 aria-label 组合
+            'button.run-button[aria-label="Run"]',
+            'button.run-button[type="submit"]',
+            // 通用选择器
             'button[aria-label="Run"]',
+            'button.run-button',
+            'button:has-text("Run")',
             '[data-testid="run-button"]',
-            '.run-button'
+            'button[type="submit"]:has-text("Run")'
           ]
 
-          let runClicked = false
-          for (const selector of runButtonSelectors) {
+          const stopBtnSelector = 'button:has-text("Stop")'
+          const maxRunRetries = 3
+          let runSuccess = false
+
+          for (let runRetry = 0; runRetry < maxRunRetries && !runSuccess; runRetry++) {
+            if (runRetry > 0) {
+              console.log(`[VERIFY_IPC] 发送按钮点击重试 ${runRetry}/${maxRunRetries}...`)
+              await page.waitForTimeout(1000)
+            }
+
+            let runClicked = false
+            for (const selector of runButtonSelectors) {
+              try {
+                const btn = await page.locator(selector).first()
+                const isVisible = await btn.isVisible({ timeout: 500 })
+                if (isVisible) {
+                  // 获取按钮位置信息用于调试
+                  const box = await btn.boundingBox()
+                  console.log(`[VERIFY_IPC] 找到发送按钮: ${selector}, 位置: x=${box?.x}, y=${box?.y}, w=${box?.width}, h=${box?.height}`)
+
+                  // 确保按钮在视口内
+                  await btn.scrollIntoViewIfNeeded()
+                  await page.waitForTimeout(200)
+
+                  // 检查按钮是否被禁用
+                  const isDisabled = await btn.getAttribute('aria-disabled')
+                  if (isDisabled === 'true') {
+                    console.log('[VERIFY_IPC] ⚠ 按钮被禁用，跳过此选择器')
+                    continue
+                  }
+
+                  // 模拟鼠标移动到按钮上
+                  await btn.hover()
+                  await page.waitForTimeout(200 + Math.random() * 200)
+
+                  // 方法1：先尝试普通点击
+                  try {
+                    await btn.click({ timeout: 3000 })
+                    console.log('[VERIFY_IPC] ✓ 普通点击发送按钮成功:', selector)
+                    runClicked = true
+                    break
+                  } catch (clickErr) {
+                    console.log('[VERIFY_IPC] 普通点击失败，尝试强制点击...')
+                  }
+
+                  // 方法2：强制点击
+                  try {
+                    await btn.click({ force: true, timeout: 3000 })
+                    console.log('[VERIFY_IPC] ✓ 强制点击发送按钮成功:', selector)
+                    runClicked = true
+                    break
+                  } catch (forceClickErr) {
+                    console.log('[VERIFY_IPC] 强制点击也失败，尝试 JavaScript 点击...')
+                  }
+
+                  // 方法3：使用 JavaScript 直接点击
+                  try {
+                    await btn.evaluate((el) => el.click())
+                    console.log('[VERIFY_IPC] ✓ JavaScript 点击发送按钮成功:', selector)
+                    runClicked = true
+                    break
+                  } catch (jsClickErr) {
+                    console.log('[VERIFY_IPC] JavaScript 点击也失败:', jsClickErr.message)
+                  }
+                }
+              } catch (e) {
+                continue
+              }
+            }
+
+            // 如果所有按钮点击方式都失败，使用快捷键 Ctrl+Enter
+            if (!runClicked) {
+              console.log('[VERIFY_IPC] 所有按钮点击方式失败，使用 Ctrl+Enter 快捷键...')
+              try {
+                await inputElement.focus()
+                await page.waitForTimeout(200)
+                await page.keyboard.press('Control+Enter')
+                console.log('[VERIFY_IPC] ✓ 已发送 Ctrl+Enter 快捷键')
+              } catch (e) {
+                console.log('[VERIFY_IPC] Ctrl+Enter 也失败:', e.message)
+              }
+            }
+
+            // 验证发送是否成功：检查 Stop 按钮是否出现
+            console.log('[VERIFY_IPC] 等待验证发送结果...')
+            await page.waitForTimeout(2000)
             try {
-              const btn = await page.locator(selector).first()
-              if (await btn.isVisible()) {
-                console.log('[VERIFY_IPC] Found Run button with selector:', selector)
-
-                // 模拟鼠标移动到按钮上
-                await btn.hover()
-                await page.waitForTimeout(500 + Math.random() * 500)
-
-                await btn.click()
-                runClicked = true
-                console.log('[VERIFY_IPC] Clicked Run button')
-                break
+              const stopBtn = await page.locator(stopBtnSelector).first()
+              const stopVisible = await stopBtn.isVisible({ timeout: 3000 })
+              if (stopVisible) {
+                console.log('[VERIFY_IPC] ✓ 发送成功确认：Stop 按钮已出现')
+                runSuccess = true
+              } else {
+                console.log('[VERIFY_IPC] ⚠ Stop 按钮未出现，可能发送失败')
               }
             } catch (e) {
-              continue
+              console.log('[VERIFY_IPC] ⚠ 检查 Stop 按钮时出错:', e.message)
+            }
+
+            // 如果还没成功，尝试再次点击输入框确保焦点正确
+            if (!runSuccess && runRetry < maxRunRetries - 1) {
+              console.log('[VERIFY_IPC] 准备重试，先恢复输入框焦点...')
+              try {
+                await inputElement.click()
+                await page.waitForTimeout(500)
+              } catch (e) {
+                // 忽略
+              }
             }
           }
 
-          // 方法B: 如果没找到按钮，使用快捷键 Ctrl+Enter
-          if (!runClicked) {
-            console.log('[VERIFY_IPC] Run button not found, trying Ctrl+Enter shortcut...')
-            await page.waitForTimeout(1000)
-            await inputElement.press('Control+Enter')
-            console.log('[VERIFY_IPC] Pressed Ctrl+Enter')
+          if (!runSuccess) {
+            console.log('[VERIFY_IPC] ⚠ 发送按钮点击可能未成功，但继续等待响应...')
           }
 
           // 5. 等待并提取 AI 回复

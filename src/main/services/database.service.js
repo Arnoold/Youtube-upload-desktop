@@ -133,6 +133,9 @@ class DatabaseService {
     // 迁移：为 browser_profiles 表添加新字段
     this.migrateBrowserProfiles()
 
+    // 迁移：为 commentary_tasks 表添加时间字段
+    this.migrateCommentaryTasks()
+
     console.log('Database tables created/verified')
   }
 
@@ -179,6 +182,23 @@ class DatabaseService {
     if (!columnNames.includes('browser_type')) {
       this.db.exec("ALTER TABLE ai_studio_accounts ADD COLUMN browser_type TEXT DEFAULT 'bitbrowser'")
       console.log('Added browser_type column to ai_studio_accounts')
+    }
+  }
+
+  migrateCommentaryTasks() {
+    const columns = this.db.pragma('table_info(commentary_tasks)')
+    const columnNames = columns.map(col => col.name)
+
+    // 添加 started_at 字段（任务开始执行时间）
+    if (!columnNames.includes('started_at')) {
+      this.db.exec('ALTER TABLE commentary_tasks ADD COLUMN started_at DATETIME')
+      console.log('Added started_at column to commentary_tasks')
+    }
+
+    // 添加 finished_at 字段（任务完成时间）
+    if (!columnNames.includes('finished_at')) {
+      this.db.exec('ALTER TABLE commentary_tasks ADD COLUMN finished_at DATETIME')
+      console.log('Added finished_at column to commentary_tasks')
     }
   }
 
@@ -389,6 +409,16 @@ class DatabaseService {
     return this.db.prepare('UPDATE commentary_tasks SET status = ? WHERE id = ?').run(status, id)
   }
 
+  // 更新任务开始时间
+  updateCommentaryTaskStartTime(id) {
+    return this.db.prepare('UPDATE commentary_tasks SET started_at = CURRENT_TIMESTAMP WHERE id = ?').run(id)
+  }
+
+  // 更新任务结束时间
+  updateCommentaryTaskFinishTime(id) {
+    return this.db.prepare('UPDATE commentary_tasks SET finished_at = CURRENT_TIMESTAMP WHERE id = ?').run(id)
+  }
+
   deleteCommentaryTask(id) {
     // 级联删除任务项
     this.db.prepare('DELETE FROM commentary_task_items WHERE task_id = ?').run(id)
@@ -426,10 +456,45 @@ class DatabaseService {
 
   updateCommentaryTaskItemStatus(id, status, result = null, error = null) {
     return this.db.prepare(`
-      UPDATE commentary_task_items 
-      SET status = ?, result = ?, error = ?, updated_at = CURRENT_TIMESTAMP 
+      UPDATE commentary_task_items
+      SET status = ?, result = ?, error = ?, updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `).run(status, result ? JSON.stringify(result) : null, error, id)
+  }
+
+  // 获取解说词任务的统计信息
+  getCommentaryTaskStats(taskId) {
+    const stats = this.db.prepare(`
+      SELECT
+        COUNT(*) as total,
+        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+        SUM(CASE WHEN status = 'failed' OR status = 'error' THEN 1 ELSE 0 END) as failed,
+        SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
+        SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as processing
+      FROM commentary_task_items
+      WHERE task_id = ?
+    `).get(taskId)
+
+    return {
+      total: stats.total || 0,
+      completed: stats.completed || 0,
+      failed: stats.failed || 0,
+      pending: stats.pending || 0,
+      processing: stats.processing || 0
+    }
+  }
+
+  // 获取所有解说词任务及其统计信息
+  getCommentaryTasksWithStats() {
+    const tasks = this.db.prepare('SELECT * FROM commentary_tasks ORDER BY created_at DESC').all()
+    return tasks.map(task => {
+      const stats = this.getCommentaryTaskStats(task.id)
+      return {
+        ...task,
+        filters: JSON.parse(task.filters || '{}'),
+        stats
+      }
+    })
   }
 
   // ===== 设置相关方法 =====

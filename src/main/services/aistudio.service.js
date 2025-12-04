@@ -191,8 +191,9 @@ class AIStudioService {
 
       console.log(`[AIStudio] Starting task ${taskId}, total: ${total}, pending: ${pendingItems.length}`)
 
-      // 更新任务状态
+      // 更新任务状态和开始时间
       this.dbService.updateCommentaryTaskStatus(taskId, 'processing')
+      this.dbService.updateCommentaryTaskStartTime(taskId)
 
       for (let i = 0; i < pendingItems.length; i++) {
         if (this.shouldStop) {
@@ -252,11 +253,13 @@ class AIStudioService {
         this.dbService.updateCommentaryTaskStatus(taskId, 'paused')
       } else {
         this.dbService.updateCommentaryTaskStatus(taskId, 'completed')
+        this.dbService.updateCommentaryTaskFinishTime(taskId)
       }
 
     } catch (error) {
       console.error('Task execution failed:', error)
       this.dbService.updateCommentaryTaskStatus(taskId, 'error')
+      this.dbService.updateCommentaryTaskFinishTime(taskId)
       throw error
     } finally {
       this.isProcessing = false
@@ -305,8 +308,9 @@ class AIStudioService {
 
       console.log(`[AIStudio] Starting parallel task ${taskId}, total: ${total}, pending: ${pendingItems.length}, workers: ${browserProfileIds.length}`)
 
-      // 更新任务状态
+      // 更新任务状态和开始时间
       this.dbService.updateCommentaryTaskStatus(taskId, 'processing')
+      this.dbService.updateCommentaryTaskStartTime(taskId)
 
       // 2. 初始化任务队列
       this.taskQueue = [...pendingItems]
@@ -331,6 +335,7 @@ class AIStudioService {
         })
       } else {
         this.dbService.updateCommentaryTaskStatus(taskId, 'completed')
+        this.dbService.updateCommentaryTaskFinishTime(taskId)
         progressCallback({
           type: 'task',
           taskId: taskId,
@@ -342,6 +347,7 @@ class AIStudioService {
     } catch (error) {
       console.error('Parallel task execution failed:', error)
       this.dbService.updateCommentaryTaskStatus(taskId, 'error')
+      this.dbService.updateCommentaryTaskFinishTime(taskId)
       progressCallback({
         type: 'task',
         taskId: taskId,
@@ -616,32 +622,149 @@ class AIStudioService {
       await clipboardLock.writeAndPaste(page, this.defaultPrompt, `worker-paste-prompt`)
       await page.waitForTimeout(500)
 
-      // 发送
+      // 发送 - 增强版：多重验证和重试机制
+      // 基于实际 HTML 结构优化的选择器（按优先级排序）
       const sendSelectors = [
-        'button:has-text("Run")',
+        // 最精确：ms-run-button 组件内的 button
+        'ms-run-button button.run-button',
+        'ms-run-button button[aria-label="Run"]',
+        'ms-run-button button[type="submit"]',
+        // 次精确：class 和 aria-label 组合
+        'button.run-button[aria-label="Run"]',
+        'button.run-button[type="submit"]',
+        // 通用选择器
         'button[aria-label="Run"]',
+        'button.run-button',
+        'button:has-text("Run")',
         '[data-testid="run-button"]',
-        '.run-button',
-        'button[aria-label*="Send"]',
-        'button[type="submit"]'
+        'button[type="submit"]:has-text("Run")'
       ]
 
-      let sent = false
-      for (const selector of sendSelectors) {
-        try {
-          const button = await page.locator(selector).first()
-          if (await button.isVisible()) {
-            await button.click()
-            sent = true
-            break
+      // Stop 按钮选择器 - 基于实际 HTML 结构优化
+      // 当 Run 按钮点击后，ms-run-button 组件内的按钮会变成 Stop 按钮
+      const stopButtonSelectors = [
+        'ms-run-button button:has-text("Stop")',
+        'ms-run-button button[aria-label="Stop"]',
+        'button.run-button:has-text("Stop")',
+        'button[aria-label="Stop"]',
+        'button:has-text("Stop")'
+      ]
+      const maxRetries = 3
+      let sendSuccess = false
+
+      for (let retry = 0; retry < maxRetries && !sendSuccess; retry++) {
+        if (retry > 0) {
+          console.log(`[${workerId}] 发送按钮点击重试 ${retry}/${maxRetries}...`)
+          await page.waitForTimeout(1000)
+        }
+
+        // 尝试点击发送按钮
+        let clicked = false
+        for (const selector of sendSelectors) {
+          try {
+            const button = await page.locator(selector).first()
+            const isVisible = await button.isVisible({ timeout: 500 })
+            if (isVisible) {
+              // 获取按钮位置信息用于调试
+              const box = await button.boundingBox()
+              console.log(`[${workerId}] 找到发送按钮: ${selector}, 位置: x=${box?.x}, y=${box?.y}, w=${box?.width}, h=${box?.height}`)
+
+              // 确保按钮在视口内
+              await button.scrollIntoViewIfNeeded()
+              await page.waitForTimeout(300)
+
+              // 检查按钮是否被禁用
+              const isDisabled = await button.getAttribute('aria-disabled')
+              if (isDisabled === 'true') {
+                console.log(`[${workerId}] ⚠ 按钮被禁用，跳过此选择器`)
+                continue
+              }
+
+              // 方法1：先尝试普通点击
+              try {
+                await button.click({ timeout: 3000 })
+                console.log(`[${workerId}] ✓ 普通点击发送按钮成功: ${selector}`)
+                clicked = true
+                break
+              } catch (clickErr) {
+                console.log(`[${workerId}] 普通点击失败，尝试强制点击...`)
+              }
+
+              // 方法2：强制点击
+              try {
+                await button.click({ force: true, timeout: 3000 })
+                console.log(`[${workerId}] ✓ 强制点击发送按钮成功: ${selector}`)
+                clicked = true
+                break
+              } catch (forceClickErr) {
+                console.log(`[${workerId}] 强制点击也失败，尝试 JavaScript 点击...`)
+              }
+
+              // 方法3：使用 JavaScript 直接点击
+              try {
+                await button.evaluate((el) => el.click())
+                console.log(`[${workerId}] ✓ JavaScript 点击发送按钮成功: ${selector}`)
+                clicked = true
+                break
+              } catch (jsClickErr) {
+                console.log(`[${workerId}] JavaScript 点击也失败: ${jsClickErr.message}`)
+              }
+            }
+          } catch (e) {
+            // 选择器未找到，继续下一个
+            continue
           }
-        } catch (e) {
-          continue
+        }
+
+        // 如果所有按钮点击方式都失败，使用键盘快捷键
+        if (!clicked) {
+          console.log(`[${workerId}] 所有按钮点击方式失败，使用 Ctrl+Enter 快捷键...`)
+          try {
+            // 确保输入框有焦点
+            await inputElement.focus()
+            await page.waitForTimeout(200)
+            await page.keyboard.press('Control+Enter')
+            console.log(`[${workerId}] ✓ 已发送 Ctrl+Enter 快捷键`)
+          } catch (e) {
+            console.log(`[${workerId}] Ctrl+Enter 也失败: ${e.message}`)
+          }
+        }
+
+        // 验证发送是否成功：检查 Stop 按钮是否出现（使用多个选择器）
+        console.log(`[${workerId}] 等待验证发送结果...`)
+        await page.waitForTimeout(2000)
+        for (const stopSelector of stopButtonSelectors) {
+          try {
+            const stopButton = await page.locator(stopSelector).first()
+            const stopVisible = await stopButton.isVisible({ timeout: 1500 })
+            if (stopVisible) {
+              console.log(`[${workerId}] ✓ 发送成功确认：Stop 按钮已出现 (选择器: ${stopSelector})`)
+              sendSuccess = true
+              break
+            }
+          } catch (e) {
+            // 继续尝试下一个选择器
+            continue
+          }
+        }
+        if (!sendSuccess) {
+          console.log(`[${workerId}] ⚠ Stop 按钮未出现，可能发送失败`)
+        }
+
+        // 如果还没成功，尝试再次点击输入框确保焦点正确
+        if (!sendSuccess && retry < maxRetries - 1) {
+          console.log(`[${workerId}] 准备重试，先恢复输入框焦点...`)
+          try {
+            await inputElement.click()
+            await page.waitForTimeout(500)
+          } catch (e) {
+            // 忽略
+          }
         }
       }
 
-      if (!sent) {
-        await inputElement.press('Control+Enter')
+      if (!sendSuccess) {
+        console.log(`[${workerId}] ⚠ 发送按钮点击可能未成功，但继续等待响应...`)
       }
 
       // Step 8: 等待 AI 回复
@@ -657,8 +780,6 @@ class AIStudioService {
 
       let response = ''
 
-      // Stop 按钮选择器
-      const stopButtonSelector = 'button:has-text("Stop")'
       // thumb_up 图标选择器
       const thumbUpSelectors = [
         'button[iconname="thumb_up"]',
@@ -684,31 +805,36 @@ class AIStudioService {
         const elapsed = Math.round((Date.now() - startTime) / 1000)
         let statusMsg = `⏱️ 等待AI回复... ${elapsed}s`
 
-        // 检查 Stop 按钮状态
-        try {
-          const stopButton = await page.locator(stopButtonSelector).first()
-          const stopVisible = await stopButton.isVisible({ timeout: 300 })
-
-          if (stopVisible) {
-            if (!stopButtonSeenAt) {
-              stopButtonSeenAt = new Date().toLocaleTimeString()
-              console.log(`[${workerId}] ⏳ Stop按钮出现 @ ${stopButtonSeenAt}`)
-            }
-            statusMsg += ` | ⏹️ Stop按钮: 可见 (出现于 ${stopButtonSeenAt})`
-          } else {
-            if (stopButtonSeenAt && !stopButtonGoneAt) {
-              stopButtonGoneAt = new Date().toLocaleTimeString()
-              console.log(`[${workerId}] ✅ Stop按钮消失 @ ${stopButtonGoneAt}`)
-            }
-            if (stopButtonGoneAt) {
-              statusMsg += ` | ✅ Stop按钮: 已消失 (于 ${stopButtonGoneAt})`
-              // Stop 按钮消失后，立即滚动到底部，确保最新回复可见
-              await this.scrollChatToBottom(page)
-              await page.waitForTimeout(500)
-            }
+        // 检查 Stop 按钮状态（使用多个选择器）
+        let stopVisible = false
+        for (const stopSelector of stopButtonSelectors) {
+          try {
+            const stopButton = await page.locator(stopSelector).first()
+            stopVisible = await stopButton.isVisible({ timeout: 200 })
+            if (stopVisible) break
+          } catch (e) {
+            // 继续尝试下一个选择器
+            continue
           }
-        } catch (e) {
-          // Stop 按钮不存在
+        }
+
+        if (stopVisible) {
+          if (!stopButtonSeenAt) {
+            stopButtonSeenAt = new Date().toLocaleTimeString()
+            console.log(`[${workerId}] ⏳ Stop按钮出现 @ ${stopButtonSeenAt}`)
+          }
+          statusMsg += ` | ⏹️ Stop按钮: 可见 (出现于 ${stopButtonSeenAt})`
+        } else {
+          if (stopButtonSeenAt && !stopButtonGoneAt) {
+            stopButtonGoneAt = new Date().toLocaleTimeString()
+            console.log(`[${workerId}] ✅ Stop按钮消失 @ ${stopButtonGoneAt}`)
+          }
+          if (stopButtonGoneAt) {
+            statusMsg += ` | ✅ Stop按钮: 已消失 (于 ${stopButtonGoneAt})`
+            // Stop 按钮消失后，立即滚动到底部，确保最新回复可见
+            await this.scrollChatToBottom(page)
+            await page.waitForTimeout(500)
+          }
         }
 
         // 检查 thumb_up 图标
@@ -1166,35 +1292,148 @@ class AIStudioService {
 
       await page.waitForTimeout(1000)
 
-      // 尝试多种方式发送
-      const sendSelectors = [
-        'button:has-text("Run")',
+      // 发送 - 增强版：多重验证和重试机制
+      // 基于实际 HTML 结构优化的选择器（按优先级排序）
+      const sendSelectors2 = [
+        // 最精确：ms-run-button 组件内的 button
+        'ms-run-button button.run-button',
+        'ms-run-button button[aria-label="Run"]',
+        'ms-run-button button[type="submit"]',
+        // 次精确：class 和 aria-label 组合
+        'button.run-button[aria-label="Run"]',
+        'button.run-button[type="submit"]',
+        // 通用选择器
         'button[aria-label="Run"]',
+        'button.run-button',
+        'button:has-text("Run")',
         '[data-testid="run-button"]',
-        '.run-button',
-        'button[aria-label*="Send"]',
-        'button[type="submit"]'
+        'button[type="submit"]:has-text("Run")'
       ]
 
-      let sent = false
-      for (const selector of sendSelectors) {
-        try {
-          const button = await page.locator(selector).first()
-          if (await button.isVisible()) {
-            await button.click()
-            sent = true
-            console.log('Clicked send button with selector:', selector)
-            break
+      // Stop 按钮选择器 - 基于实际 HTML 结构优化
+      const stopButtonSelectorsSingle = [
+        'ms-run-button button:has-text("Stop")',
+        'ms-run-button button[aria-label="Stop"]',
+        'button.run-button:has-text("Stop")',
+        'button[aria-label="Stop"]',
+        'button:has-text("Stop")'
+      ]
+      const maxRetriesSingle = 3
+      let sendSuccessSingle = false
+
+      for (let retry = 0; retry < maxRetriesSingle && !sendSuccessSingle; retry++) {
+        if (retry > 0) {
+          console.log(`[AIStudio] 发送按钮点击重试 ${retry}/${maxRetriesSingle}...`)
+          await page.waitForTimeout(1000)
+        }
+
+        // 尝试点击发送按钮
+        let clicked = false
+        for (const selector of sendSelectors2) {
+          try {
+            const button = await page.locator(selector).first()
+            const isVisible = await button.isVisible({ timeout: 500 })
+            if (isVisible) {
+              // 获取按钮位置信息用于调试
+              const box = await button.boundingBox()
+              console.log(`[AIStudio] 找到发送按钮: ${selector}, 位置: x=${box?.x}, y=${box?.y}, w=${box?.width}, h=${box?.height}`)
+
+              // 确保按钮在视口内
+              await button.scrollIntoViewIfNeeded()
+              await page.waitForTimeout(300)
+
+              // 检查按钮是否被禁用
+              const isDisabled = await button.getAttribute('aria-disabled')
+              if (isDisabled === 'true') {
+                console.log('[AIStudio] ⚠ 按钮被禁用，跳过此选择器')
+                continue
+              }
+
+              // 方法1：先尝试普通点击
+              try {
+                await button.click({ timeout: 3000 })
+                console.log('[AIStudio] ✓ 普通点击发送按钮成功:', selector)
+                clicked = true
+                break
+              } catch (clickErr) {
+                console.log('[AIStudio] 普通点击失败，尝试强制点击...')
+              }
+
+              // 方法2：强制点击
+              try {
+                await button.click({ force: true, timeout: 3000 })
+                console.log('[AIStudio] ✓ 强制点击发送按钮成功:', selector)
+                clicked = true
+                break
+              } catch (forceClickErr) {
+                console.log('[AIStudio] 强制点击也失败，尝试 JavaScript 点击...')
+              }
+
+              // 方法3：使用 JavaScript 直接点击
+              try {
+                await button.evaluate((el) => el.click())
+                console.log('[AIStudio] ✓ JavaScript 点击发送按钮成功:', selector)
+                clicked = true
+                break
+              } catch (jsClickErr) {
+                console.log('[AIStudio] JavaScript 点击也失败:', jsClickErr.message)
+              }
+            }
+          } catch (e) {
+            // 选择器未找到，继续下一个
+            continue
           }
-        } catch (e) {
-          continue
+        }
+
+        // 如果所有按钮点击方式都失败，使用键盘快捷键
+        if (!clicked) {
+          console.log('[AIStudio] 所有按钮点击方式失败，使用 Ctrl+Enter 快捷键...')
+          try {
+            // 确保输入框有焦点
+            await inputElement.focus()
+            await page.waitForTimeout(200)
+            await page.keyboard.press('Control+Enter')
+            console.log('[AIStudio] ✓ 已发送 Ctrl+Enter 快捷键')
+          } catch (e) {
+            console.log('[AIStudio] Ctrl+Enter 也失败:', e.message)
+          }
+        }
+
+        // 验证发送是否成功：检查 Stop 按钮是否出现（使用多个选择器）
+        console.log('[AIStudio] 等待验证发送结果...')
+        await page.waitForTimeout(2000)
+        for (const stopSelector of stopButtonSelectorsSingle) {
+          try {
+            const stopButton = await page.locator(stopSelector).first()
+            const stopVisible = await stopButton.isVisible({ timeout: 1500 })
+            if (stopVisible) {
+              console.log(`[AIStudio] ✓ 发送成功确认：Stop 按钮已出现 (选择器: ${stopSelector})`)
+              sendSuccessSingle = true
+              break
+            }
+          } catch (e) {
+            // 继续尝试下一个选择器
+            continue
+          }
+        }
+        if (!sendSuccessSingle) {
+          console.log('[AIStudio] ⚠ Stop 按钮未出现，可能发送失败')
+        }
+
+        // 如果还没成功，尝试再次点击输入框确保焦点正确
+        if (!sendSuccessSingle && retry < maxRetriesSingle - 1) {
+          console.log('[AIStudio] 准备重试，先恢复输入框焦点...')
+          try {
+            await inputElement.click()
+            await page.waitForTimeout(500)
+          } catch (e) {
+            // 忽略
+          }
         }
       }
 
-      // 如果没找到按钮，尝试按 Enter
-      if (!sent) {
-        console.log('No send button found, trying Ctrl+Enter...')
-        await inputElement.press('Control+Enter')
+      if (!sendSuccessSingle) {
+        console.log('[AIStudio] ⚠ 发送按钮点击可能未成功，但继续等待响应...')
       }
 
       // Step 8: 等待 AI 回复
@@ -1220,8 +1459,14 @@ class AIStudioService {
           '[aria-label*="like"]'
         ]
 
-        // Stop 按钮消失也是完成标志
-        const stopButtonSelector = 'button:has-text("Stop")'
+        // Stop 按钮选择器数组 - 与 stopButtonSelectorsSingle 保持一致
+        const stopButtonSelectorsLoop = [
+          'ms-run-button button:has-text("Stop")',
+          'ms-run-button button[aria-label="Stop"]',
+          'button.run-button:has-text("Stop")',
+          'button[aria-label="Stop"]',
+          'button:has-text("Stop")'
+        ]
 
         let completionFound = false
         const startTime = Date.now()
@@ -1240,31 +1485,35 @@ class AIStudioService {
           const elapsed = Math.round((Date.now() - startTime) / 1000)
           let statusMsg = `⏱️ 等待AI回复... ${elapsed}s`
 
-          // 检查 Stop 按钮状态
-          try {
-            const stopButton = await page.locator(stopButtonSelector).first()
-            const stopVisible = await stopButton.isVisible({ timeout: 300 })
-
-            if (stopVisible) {
-              if (!stopButtonSeenAt) {
-                stopButtonSeenAt = new Date().toLocaleTimeString()
-                console.log(`[AIStudio] ⏳ Stop按钮出现 @ ${stopButtonSeenAt}`)
-              }
-              statusMsg += ` | ⏹️ Stop按钮: 可见 (出现于 ${stopButtonSeenAt})`
-            } else {
-              if (stopButtonSeenAt && !stopButtonGoneAt) {
-                stopButtonGoneAt = new Date().toLocaleTimeString()
-                console.log(`[AIStudio] ✅ Stop按钮消失 @ ${stopButtonGoneAt}`)
-              }
-              if (stopButtonGoneAt) {
-                statusMsg += ` | ✅ Stop按钮: 已消失 (于 ${stopButtonGoneAt})`
-                // Stop 按钮消失后，立即滚动到底部，确保最新内容加载
-                await this.scrollChatToBottom(page)
-                await page.waitForTimeout(500)
-              }
+          // 检查 Stop 按钮状态（使用多个选择器）
+          let stopVisible = false
+          for (const stopSelector of stopButtonSelectorsLoop) {
+            try {
+              const stopButton = await page.locator(stopSelector).first()
+              stopVisible = await stopButton.isVisible({ timeout: 200 })
+              if (stopVisible) break
+            } catch (e) {
+              continue
             }
-          } catch (e) {
-            // Stop 按钮不存在
+          }
+
+          if (stopVisible) {
+            if (!stopButtonSeenAt) {
+              stopButtonSeenAt = new Date().toLocaleTimeString()
+              console.log(`[AIStudio] ⏳ Stop按钮出现 @ ${stopButtonSeenAt}`)
+            }
+            statusMsg += ` | ⏹️ Stop按钮: 可见 (出现于 ${stopButtonSeenAt})`
+          } else {
+            if (stopButtonSeenAt && !stopButtonGoneAt) {
+              stopButtonGoneAt = new Date().toLocaleTimeString()
+              console.log(`[AIStudio] ✅ Stop按钮消失 @ ${stopButtonGoneAt}`)
+            }
+            if (stopButtonGoneAt) {
+              statusMsg += ` | ✅ Stop按钮: 已消失 (于 ${stopButtonGoneAt})`
+              // Stop 按钮消失后，立即滚动到底部，确保最新内容加载
+              await this.scrollChatToBottom(page)
+              await page.waitForTimeout(500)
+            }
           }
 
           // 检查 thumb_up 图标

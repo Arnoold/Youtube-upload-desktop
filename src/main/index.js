@@ -22,13 +22,15 @@ const UploadService = require('./services/upload.service')
 let mainWindow = null
 let services = {}
 
-const LOG_PATH = 'd:\\Youtube-upload-desktop\\debug_ipc.log'
+// 使用动态路径，基于应用所在目录
+const LOG_PATH = path.join(__dirname, '../../debug_ipc.log')
 
 function log(msg) {
   try {
     fs.appendFileSync(LOG_PATH, `[${new Date().toISOString()}] ${msg}\n`)
   } catch (e) {
-    console.error('Failed to write log:', e)
+    // 静默忽略日志写入错误，避免控制台输出过多信息
+    // console.error('Failed to write log:', e)
   }
 }
 
