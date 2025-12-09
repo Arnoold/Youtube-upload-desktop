@@ -7,7 +7,10 @@ import {
   DatabaseOutlined,
   FileTextOutlined,
   VideoCameraOutlined,
-  ClockCircleOutlined
+  ClockCircleOutlined,
+  UserOutlined,
+  GlobalOutlined,
+  HistoryOutlined
 } from '@ant-design/icons'
 import HomePage from './pages/HomePage'
 import BrowserPage from './pages/BrowserPage'
@@ -17,6 +20,9 @@ import SupabaseSettingsPage from './pages/SupabaseSettingsPage'
 import CommentaryTaskPage from './pages/CommentaryTaskPage'
 import DouyinPage from './pages/DouyinPage'
 import SchedulerPage from './pages/SchedulerPage'
+import CollectAccountPage from './pages/CollectAccountPage'
+import BrowserSettingsPage from './pages/BrowserSettingsPage'
+import UploadLogsPage from './pages/UploadLogsPage'
 
 const { Content, Sider } = Layout
 
@@ -37,6 +43,11 @@ const App = () => {
           key: 'browser',
           icon: <ChromeOutlined />,
           label: '发布账号管理'
+        },
+        {
+          key: 'upload-logs',
+          icon: <HistoryOutlined />,
+          label: '上传日志'
         }
       ]
     },
@@ -48,6 +59,11 @@ const App = () => {
           key: 'douyin',
           icon: <VideoCameraOutlined />,
           label: '视频采集'
+        },
+        {
+          key: 'collect-accounts',
+          icon: <UserOutlined />,
+          label: '采集账号管理'
         }
       ]
     },
@@ -69,6 +85,17 @@ const App = () => {
           key: 'aistudio-accounts',
           icon: <ChromeOutlined />,
           label: 'AIstudio账号'
+        }
+      ]
+    },
+    {
+      type: 'group',
+      label: '系统设置',
+      children: [
+        {
+          key: 'browser-settings',
+          icon: <GlobalOutlined />,
+          label: '浏览器设置'
         },
         {
           key: 'supabase',
@@ -88,6 +115,10 @@ const App = () => {
     switch (currentPage) {
       case 'home':
         return <HomePage />
+      case 'upload-logs':
+        return <UploadLogsPage />
+      case 'collect-accounts':
+        return <CollectAccountPage />
       case 'douyin':
         return <DouyinPage />
       case 'commentary-tasks':
@@ -98,6 +129,8 @@ const App = () => {
         return <AIStudioAccountsPage />
       case 'browser':
         return <BrowserPage />
+      case 'browser-settings':
+        return <BrowserSettingsPage />
       case 'supabase':
         return <SupabaseSettingsPage />
       case 'settings':
@@ -114,28 +147,40 @@ const App = () => {
       }}
     >
       <Layout style={{ height: '100vh', overflow: 'hidden', flexDirection: 'row' }}>
-          <Sider width={200} style={{ background: '#fff', overflow: 'auto' }}>
-            <Menu
-              mode="inline"
-              selectedKeys={[currentPage]}
-              style={{ height: '100%', borderRight: 0 }}
-              items={menuItems}
-              onClick={({ key }) => setCurrentPage(key)}
-            />
-          </Sider>
-          <Layout style={{ padding: '24px', overflow: 'auto', background: '#f0f2f5' }}>
-            <Content
-              style={{
-                padding: 24,
-                margin: 0,
-                background: '#fff',
-                borderRadius: 8,
-                minHeight: 'fit-content'
-              }}
-            >
-              {renderPage()}
-            </Content>
-          </Layout>
+        <Sider width={200} style={{ background: '#fff', overflow: 'auto' }}>
+          <Menu
+            mode="inline"
+            selectedKeys={[currentPage]}
+            style={{ height: '100%', borderRight: 0 }}
+            items={menuItems}
+            onClick={({ key }) => setCurrentPage(key)}
+          />
+        </Sider>
+        <Layout
+          style={{
+            padding: '12px',
+            background: '#f0f2f5',
+            overflow: currentPage === 'upload-logs' ? 'hidden' : 'auto',
+            display: currentPage === 'upload-logs' ? 'flex' : 'block',
+            flexDirection: 'column'
+          }}
+        >
+          <Content
+            style={{
+              padding: 16,
+              margin: 0,
+              background: '#fff',
+              borderRadius: 8,
+              flex: currentPage === 'upload-logs' ? 1 : 'none',
+              minHeight: currentPage === 'upload-logs' ? 0 : 'fit-content',
+              overflow: currentPage === 'upload-logs' ? 'hidden' : 'visible',
+              display: currentPage === 'upload-logs' ? 'flex' : 'block',
+              flexDirection: 'column'
+            }}
+          >
+            {renderPage()}
+          </Content>
+        </Layout>
       </Layout>
     </ConfigProvider>
   )

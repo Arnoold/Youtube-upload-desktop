@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react'
-import { Typography, Button, message, Table, Modal, Form, Input, Space, Select, Tag, Card, Divider, Alert } from 'antd'
-import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, SettingOutlined, CheckCircleOutlined } from '@ant-design/icons'
+import { Typography, Button, message, Table, Modal, Form, Input, Space, Select, Tag } from 'antd'
+import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined } from '@ant-design/icons'
 
-const { Title, Text } = Typography
+const { Title } = Typography
 const { Option } = Select
 
 // 浏览器类型配置
@@ -18,12 +18,6 @@ const AIStudioAccountsPage = () => {
     const [editingProfile, setEditingProfile] = useState(null)
     const [form] = Form.useForm()
     const [checkingStatus, setCheckingStatus] = useState(false)
-
-    // HubStudio 配置
-    const [hubstudioForm] = Form.useForm()
-    const [hubstudioConfigVisible, setHubstudioConfigVisible] = useState(false)
-    const [hubstudioConnected, setHubstudioConnected] = useState(false)
-    const [testingHubstudio, setTestingHubstudio] = useState(false)
 
     // 加载配置
     const loadProfiles = async () => {
@@ -67,39 +61,8 @@ const AIStudioAccountsPage = () => {
         }
     }
 
-    // 保存 HubStudio 凭证到状态，用于在 Modal 打开时填充表单
-    const [hubstudioCredentials, setHubstudioCredentials] = useState(null)
-
-    // 加载 HubStudio 配置
-    const loadHubstudioConfig = async () => {
-        try {
-            const credentials = await window.electron.hubstudio.getCredentials()
-            if (credentials.appId) {
-                // 保存凭证到状态，稍后在 Modal 打开时使用
-                setHubstudioCredentials({
-                    appId: credentials.appId,
-                    appSecret: '', // 不显示密钥
-                    groupCode: credentials.groupCode
-                })
-                // 测试连接状态
-                const result = await window.electron.hubstudio.test()
-                setHubstudioConnected(result.success)
-            }
-        } catch (error) {
-            console.error('加载 HubStudio 配置失败:', error)
-        }
-    }
-
-    // 当 HubStudio 配置 Modal 打开时，填充表单
-    useEffect(() => {
-        if (hubstudioConfigVisible && hubstudioCredentials) {
-            hubstudioForm.setFieldsValue(hubstudioCredentials)
-        }
-    }, [hubstudioConfigVisible, hubstudioCredentials, hubstudioForm])
-
     useEffect(() => {
         loadProfiles()
-        loadHubstudioConfig()
     }, [])
 
     // 刷新状态
@@ -108,54 +71,6 @@ const AIStudioAccountsPage = () => {
         await loadProfiles()
         setCheckingStatus(false)
         message.success('状态已刷新')
-    }
-
-    // 保存 HubStudio 配置
-    const handleSaveHubstudioConfig = async () => {
-        try {
-            const values = await hubstudioForm.validateFields()
-            const result = await window.electron.hubstudio.setCredentials(
-                values.appId,
-                values.appSecret,
-                values.groupCode || ''
-            )
-            if (result.success) {
-                message.success('HubStudio 配置已保存')
-                setHubstudioConfigVisible(false)
-                // 测试连接
-                const testResult = await window.electron.hubstudio.test()
-                setHubstudioConnected(testResult.success)
-                if (!testResult.success) {
-                    message.warning('配置已保存，但连接测试失败: ' + testResult.message)
-                }
-            } else {
-                message.error('保存失败: ' + result.error)
-            }
-        } catch (error) {
-            if (!error.errorFields) {
-                message.error('保存失败: ' + error.message)
-            }
-        }
-    }
-
-    // 测试 HubStudio 连接
-    const handleTestHubstudio = async () => {
-        setTestingHubstudio(true)
-        try {
-            const result = await window.electron.hubstudio.test()
-            if (result.success) {
-                message.success('HubStudio 连接成功')
-                setHubstudioConnected(true)
-            } else {
-                message.error('连接失败: ' + result.message)
-                setHubstudioConnected(false)
-            }
-        } catch (error) {
-            message.error('测试失败: ' + error.message)
-            setHubstudioConnected(false)
-        } finally {
-            setTestingHubstudio(false)
-        }
     }
 
     // 添加/编辑
@@ -297,46 +212,7 @@ const AIStudioAccountsPage = () => {
 
     return (
         <div>
-            <Title level={2}>AI Studio 账号管理</Title>
-
-            {/* HubStudio 配置卡片 */}
-            <Card
-                size="small"
-                title={
-                    <Space>
-                        <SettingOutlined />
-                        <span>HubStudio 配置</span>
-                        {hubstudioConnected && (
-                            <Tag color="success" icon={<CheckCircleOutlined />}>已连接</Tag>
-                        )}
-                    </Space>
-                }
-                style={{ marginBottom: 16 }}
-                extra={
-                    <Space>
-                        <Button
-                            size="small"
-                            onClick={handleTestHubstudio}
-                            loading={testingHubstudio}
-                        >
-                            测试连接
-                        </Button>
-                        <Button
-                            size="small"
-                            type="primary"
-                            onClick={() => setHubstudioConfigVisible(true)}
-                        >
-                            配置凭证
-                        </Button>
-                    </Space>
-                }
-            >
-                <Text type="secondary">
-                    如需使用 HubStudio 浏览器，请先在 HubStudio 客户端获取 API 凭证（API → 用户凭证），然后点击"配置凭证"填入。
-                </Text>
-            </Card>
-
-            <Divider />
+            <Title level={4}>AI Studio 账号管理</Title>
 
             <div style={{ marginBottom: 16 }}>
                 <Space>
@@ -408,49 +284,6 @@ const AIStudioAccountsPage = () => {
                             <Option value="active">启用</Option>
                             <Option value="inactive">禁用</Option>
                         </Select>
-                    </Form.Item>
-                </Form>
-            </Modal>
-
-            {/* HubStudio 配置 Modal */}
-            <Modal
-                title="配置 HubStudio API 凭证"
-                open={hubstudioConfigVisible}
-                onOk={handleSaveHubstudioConfig}
-                onCancel={() => setHubstudioConfigVisible(false)}
-                okText="保存"
-                cancelText="取消"
-            >
-                <Alert
-                    message="获取凭证方法"
-                    description="打开 HubStudio 客户端 → 点击「API」→「用户凭证」获取 App ID 和 App Secret。团队代码在「用户中心」→「团队信息」中获取。"
-                    type="info"
-                    showIcon
-                    style={{ marginBottom: 16 }}
-                />
-                <Form form={hubstudioForm} layout="vertical">
-                    <Form.Item
-                        label="App ID"
-                        name="appId"
-                        rules={[{ required: true, message: '请输入 App ID' }]}
-                    >
-                        <Input placeholder="从 HubStudio 客户端获取" />
-                    </Form.Item>
-
-                    <Form.Item
-                        label="App Secret"
-                        name="appSecret"
-                        rules={[{ required: true, message: '请输入 App Secret' }]}
-                    >
-                        <Input.Password placeholder="从 HubStudio 客户端获取" />
-                    </Form.Item>
-
-                    <Form.Item
-                        label="团队代码 (Group Code)"
-                        name="groupCode"
-                        tooltip="可选，用于指定操作的团队"
-                    >
-                        <Input placeholder="从用户中心 → 团队信息获取（可选）" />
                     </Form.Item>
                 </Form>
             </Modal>

@@ -79,6 +79,15 @@ class DatabaseService {
       // 列已存在，忽略错误
     }
 
+    // 检查是否存在 browser_type 列，如果不存在则添加
+    try {
+      this.db.exec(`
+        ALTER TABLE browser_profiles ADD COLUMN browser_type TEXT DEFAULT 'bitbrowser'
+      `)
+    } catch (error) {
+      // 列已存在，忽略错误
+    }
+
     // 创建设置表
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS settings (
@@ -136,6 +145,62 @@ class DatabaseService {
     // 迁移：为 commentary_tasks 表添加时间字段
     this.migrateCommentaryTasks()
 
+    // 迁移：为 upload_logs 表添加时区字段
+    this.migrateUploadLogs()
+
+    // 创建采集账号表
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS collect_accounts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        bit_browser_id TEXT NOT NULL,
+        platform TEXT DEFAULT 'douyin',
+        status TEXT DEFAULT 'active',
+        remark TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `)
+
+    // 创建上传日志表
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS upload_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        browser_id TEXT NOT NULL,
+        browser_name TEXT,
+        browser_type TEXT DEFAULT 'bitbrowser',
+        file_path TEXT NOT NULL,
+        file_name TEXT NOT NULL,
+        video_title TEXT,
+        video_description TEXT,
+        visibility TEXT DEFAULT 'public',
+        scheduled_time TEXT,
+        video_url TEXT,
+        video_id TEXT,
+        producer_name TEXT,
+        producer_id INTEGER,
+        production_date TEXT,
+        status TEXT DEFAULT 'pending',
+        error_message TEXT,
+        start_time DATETIME,
+        end_time DATETIME,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `)
+
+    // 创建用户缓存表（从Supabase同步）
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS cached_users (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        phone TEXT,
+        role TEXT,
+        status TEXT,
+        synced_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `)
+
     console.log('Database tables created/verified')
   }
 
@@ -172,6 +237,12 @@ class DatabaseService {
       this.db.exec("ALTER TABLE browser_profiles ADD COLUMN status TEXT DEFAULT 'active'")
       console.log('Added status column to browser_profiles')
     }
+
+    // 添加 account_type 字段（普通号 normal / 创收号 monetized）
+    if (!columnNames.includes('account_type')) {
+      this.db.exec("ALTER TABLE browser_profiles ADD COLUMN account_type TEXT DEFAULT 'normal'")
+      console.log('Added account_type column to browser_profiles')
+    }
   }
 
   migrateAIStudioAccounts() {
@@ -199,6 +270,17 @@ class DatabaseService {
     if (!columnNames.includes('finished_at')) {
       this.db.exec('ALTER TABLE commentary_tasks ADD COLUMN finished_at DATETIME')
       console.log('Added finished_at column to commentary_tasks')
+    }
+  }
+
+  migrateUploadLogs() {
+    const columns = this.db.pragma('table_info(upload_logs)')
+    const columnNames = columns.map(col => col.name)
+
+    // 添加 scheduled_timezone 字段（定时发布时区）
+    if (!columnNames.includes('scheduled_timezone')) {
+      this.db.exec("ALTER TABLE upload_logs ADD COLUMN scheduled_timezone TEXT")
+      console.log('Added scheduled_timezone column to upload_logs')
     }
   }
 
@@ -270,8 +352,8 @@ class DatabaseService {
     const stmt = this.db.prepare(`
       INSERT INTO browser_profiles (
         name, bit_browser_id, channel_id, channel_name, youtube_email,
-        folder_path, default_timezone, default_description, default_tags
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        folder_path, default_timezone, default_description, default_tags, account_type, browser_type
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
 
     const info = stmt.run(
@@ -283,14 +365,22 @@ class DatabaseService {
       profile.folderPath || null,
       profile.defaultTimezone || 'Asia/Shanghai',
       profile.defaultDescription || null,
-      profile.defaultTags || null
+      profile.defaultTags || null,
+      profile.accountType || 'normal',
+      profile.browserType || 'bitbrowser'
     )
 
     return info.lastInsertRowid
   }
 
   getBrowserProfiles() {
-    return this.db.prepare('SELECT * FROM browser_profiles ORDER BY sort_order ASC, created_at DESC').all()
+    // 使用 COALESCE 处理 NULL 值，将 NULL 视为 999999（排在最后）
+    const profiles = this.db.prepare(`
+      SELECT * FROM browser_profiles
+      ORDER BY COALESCE(sort_order, 999999) ASC, created_at DESC
+    `).all()
+    console.log('getBrowserProfiles 返回:', profiles.map(p => ({ id: p.id, name: p.name, sort_order: p.sort_order })))
+    return profiles
   }
 
   getBrowserProfileById(id) {
@@ -317,17 +407,28 @@ class DatabaseService {
 
   // 批量更新浏览器配置排序
   updateBrowserProfilesOrder(profiles) {
+    console.log('updateBrowserProfilesOrder 收到数据:', JSON.stringify(profiles))
+
     const stmt = this.db.prepare(`
       UPDATE browser_profiles SET sort_order = ? WHERE id = ?
     `)
 
     const transaction = this.db.transaction((items) => {
+      let totalChanges = 0
       for (const item of items) {
-        stmt.run(item.sortOrder, item.id)
+        // 支持 sort_order 或 sortOrder 两种命名
+        const sortOrder = item.sort_order !== undefined ? item.sort_order : item.sortOrder
+        console.log(`更新 ID ${item.id} 的 sort_order 为 ${sortOrder}`)
+        const result = stmt.run(sortOrder, item.id)
+        console.log(`更新结果: changes=${result.changes}`)
+        totalChanges += result.changes
       }
+      return { success: true, changes: totalChanges }
     })
 
-    return transaction(profiles)
+    const result = transaction(profiles)
+    console.log('事务执行完成, 结果:', result)
+    return result
   }
 
   // ===== AI Studio 账号相关方法 =====
@@ -509,6 +610,201 @@ class DatabaseService {
       INSERT OR REPLACE INTO settings (key, value, updated_at)
       VALUES (?, ?, CURRENT_TIMESTAMP)
     `).run(key, value)
+  }
+
+  // ===== 采集账号相关方法 =====
+
+  createCollectAccount(account) {
+    const stmt = this.db.prepare(`
+      INSERT INTO collect_accounts (name, bit_browser_id, platform, remark)
+      VALUES (?, ?, ?, ?)
+    `)
+    const info = stmt.run(
+      account.name,
+      account.bitBrowserId,
+      account.platform || 'douyin',
+      account.remark || ''
+    )
+    return info.lastInsertRowid
+  }
+
+  getCollectAccounts(platform = null) {
+    if (platform) {
+      return this.db.prepare('SELECT * FROM collect_accounts WHERE platform = ? ORDER BY created_at DESC').all(platform)
+    }
+    return this.db.prepare('SELECT * FROM collect_accounts ORDER BY created_at DESC').all()
+  }
+
+  getCollectAccountById(id) {
+    return this.db.prepare('SELECT * FROM collect_accounts WHERE id = ?').get(id)
+  }
+
+  updateCollectAccount(id, account) {
+    return this.db.prepare(`
+      UPDATE collect_accounts
+      SET name = ?, bit_browser_id = ?, platform = ?, remark = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(
+      account.name,
+      account.bitBrowserId,
+      account.platform || 'douyin',
+      account.remark || '',
+      id
+    )
+  }
+
+  deleteCollectAccount(id) {
+    return this.db.prepare('DELETE FROM collect_accounts WHERE id = ?').run(id)
+  }
+
+  // ===== 上传日志相关方法 =====
+
+  createUploadLog(log) {
+    const stmt = this.db.prepare(`
+      INSERT INTO upload_logs (
+        browser_id, browser_name, browser_type, file_path, file_name,
+        video_title, video_description, visibility, scheduled_time, scheduled_timezone,
+        producer_name, producer_id, production_date, status, start_time
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `)
+    const info = stmt.run(
+      log.browser_id || log.browserId,
+      log.browser_name || log.browserName || null,
+      log.browser_type || log.browserType || 'bitbrowser',
+      log.file_path || log.filePath,
+      log.file_name || log.fileName,
+      log.video_title || log.videoTitle || null,
+      log.video_description || log.videoDescription || null,
+      log.visibility || 'public',
+      log.scheduled_time || log.scheduledTime || null,
+      log.scheduled_timezone || log.scheduledTimezone || null,
+      log.producer_name || log.producerName || null,
+      log.producer_id || log.producerId || null,
+      log.production_date || log.productionDate || null,
+      log.status || 'pending',
+      log.start_time || new Date().toISOString()
+    )
+    return info.lastInsertRowid
+  }
+
+  updateUploadLog(id, updates) {
+    const fields = []
+    const values = []
+
+    if (updates.status !== undefined) {
+      fields.push('status = ?')
+      values.push(updates.status)
+    }
+    if (updates.video_url !== undefined || updates.videoUrl !== undefined) {
+      fields.push('video_url = ?')
+      values.push(updates.video_url || updates.videoUrl)
+    }
+    if (updates.video_id !== undefined || updates.videoId !== undefined) {
+      fields.push('video_id = ?')
+      values.push(updates.video_id || updates.videoId)
+    }
+    if (updates.error_message !== undefined || updates.errorMessage !== undefined) {
+      fields.push('error_message = ?')
+      values.push(updates.error_message || updates.errorMessage)
+    }
+    if (updates.end_time !== undefined || updates.endTime !== undefined) {
+      fields.push('end_time = ?')
+      values.push(updates.end_time || updates.endTime)
+    }
+
+    fields.push('updated_at = CURRENT_TIMESTAMP')
+    values.push(id)
+
+    return this.db.prepare(`
+      UPDATE upload_logs SET ${fields.join(', ')} WHERE id = ?
+    `).run(...values)
+  }
+
+  getUploadLogs(options = {}) {
+    let sql = 'SELECT * FROM upload_logs'
+    const params = []
+    const conditions = []
+
+    if (options.browserId) {
+      conditions.push('browser_id = ?')
+      params.push(options.browserId)
+    }
+    if (options.status) {
+      conditions.push('status = ?')
+      params.push(options.status)
+    }
+    if (options.startDate) {
+      conditions.push('start_time >= ?')
+      params.push(options.startDate)
+    }
+    if (options.endDate) {
+      conditions.push('start_time <= ?')
+      params.push(options.endDate)
+    }
+
+    if (conditions.length > 0) {
+      sql += ' WHERE ' + conditions.join(' AND ')
+    }
+
+    sql += ' ORDER BY created_at DESC'
+
+    if (options.limit) {
+      sql += ' LIMIT ?'
+      params.push(options.limit)
+    }
+
+    return this.db.prepare(sql).all(...params)
+  }
+
+  getUploadLogById(id) {
+    return this.db.prepare('SELECT * FROM upload_logs WHERE id = ?').get(id)
+  }
+
+  deleteUploadLog(id) {
+    return this.db.prepare('DELETE FROM upload_logs WHERE id = ?').run(id)
+  }
+
+  clearUploadLogs() {
+    return this.db.prepare('DELETE FROM upload_logs').run()
+  }
+
+  // ===== 用户缓存相关方法 =====
+
+  syncCachedUsers(users) {
+    // 清空现有缓存
+    this.db.prepare('DELETE FROM cached_users').run()
+
+    // 插入新数据
+    const stmt = this.db.prepare(`
+      INSERT INTO cached_users (id, name, phone, role, status, synced_at)
+      VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    `)
+
+    const insertMany = this.db.transaction((users) => {
+      for (const user of users) {
+        stmt.run(user.id, user.name, user.phone || null, user.role || null, user.status || null)
+      }
+    })
+
+    insertMany(users)
+    return users.length
+  }
+
+  getCachedUsers() {
+    return this.db.prepare('SELECT * FROM cached_users ORDER BY name ASC').all()
+  }
+
+  getCachedUserByName(name) {
+    return this.db.prepare('SELECT * FROM cached_users WHERE name = ?').get(name)
+  }
+
+  getCachedUserById(id) {
+    return this.db.prepare('SELECT * FROM cached_users WHERE id = ?').get(id)
+  }
+
+  getLastUserSyncTime() {
+    const row = this.db.prepare('SELECT MAX(synced_at) as last_sync FROM cached_users').get()
+    return row ? row.last_sync : null
   }
 
   close() {

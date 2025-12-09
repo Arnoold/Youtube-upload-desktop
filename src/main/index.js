@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron')
+const { app, BrowserWindow, ipcMain, dialog, globalShortcut, Menu } = require('electron')
 const path = require('path')
 const { setupIPC } = require('./ipc-handlers')
 const fs = require('fs')
@@ -62,9 +62,44 @@ function createWindow() {
     mainWindow.loadFile(path.join(__dirname, '../../dist/index.html'))
   }
 
+  // 添加菜单（包含开发者工具选项）
+  const template = [
+    {
+      label: '文件',
+      submenu: [
+        { role: 'quit', label: '退出' }
+      ]
+    },
+    {
+      label: '视图',
+      submenu: [
+        { role: 'reload', label: '刷新' },
+        { role: 'forceReload', label: '强制刷新' },
+        { type: 'separator' },
+        { role: 'toggleDevTools', label: '开发者工具', accelerator: 'Ctrl+Shift+I' },
+        { type: 'separator' },
+        { role: 'resetZoom', label: '重置缩放' },
+        { role: 'zoomIn', label: '放大' },
+        { role: 'zoomOut', label: '缩小' },
+        { type: 'separator' },
+        { role: 'togglefullscreen', label: '全屏' }
+      ]
+    }
+  ]
+  const menu = Menu.buildFromTemplate(template)
+  Menu.setApplicationMenu(menu)
+
   mainWindow.on('closed', () => {
     mainWindow = null
   })
+
+  // 注册快捷键打开开发者工具 (Ctrl+Shift+D)
+  globalShortcut.register('CommandOrControl+Shift+D', () => {
+    if (mainWindow && mainWindow.webContents) {
+      mainWindow.webContents.toggleDevTools()
+    }
+  })
+
   log('createWindow: Browser window created.')
 }
 

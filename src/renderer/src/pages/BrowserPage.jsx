@@ -1,6 +1,10 @@
 import React, { useState, useEffect } from 'react'
-import { Typography, Button, message, Table, Modal, Form, Input, Select, Space } from 'antd'
-import { SyncOutlined, PlusOutlined, EditOutlined, DeleteOutlined, FolderOutlined } from '@ant-design/icons'
+import { Typography, Button, message, Table, Modal, Form, Input, Select, Space, Dropdown } from 'antd'
+import { SyncOutlined, PlusOutlined, EditOutlined, DeleteOutlined, FolderOutlined, MoreOutlined, HolderOutlined } from '@ant-design/icons'
+import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors } from '@dnd-kit/core'
+import { arrayMove, SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
+import { restrictToVerticalAxis } from '@dnd-kit/modifiers'
 
 const { Title } = Typography
 const { TextArea } = Input
@@ -92,95 +96,240 @@ const TIMEZONES = [
   { value: 'Pacific/Chatham', label: '(GMT+13:45) 查塔姆' }
 ]
 
+// 账号类型选项
+const ACCOUNT_TYPES = [
+  { value: 'normal', label: '普通号' },
+  { value: 'monetized', label: '创收号' }
+]
+
+// 浏览器类型选项
+const BROWSER_TYPES = [
+  { value: 'bitbrowser', label: 'BitBrowser (比特浏览器)' },
+  { value: 'hubstudio', label: 'HubStudio' }
+]
+
+// 可排序行组件
+const SortableRow = ({ children, ...props }) => {
+  const id = props['data-row-key']
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging
+  } = useSortable({ id })
+
+  const style = {
+    ...props.style,
+    transform: CSS.Transform.toString(transform && { ...transform, scaleY: 1 }),
+    transition,
+    ...(isDragging ? { position: 'relative', zIndex: 9999, background: '#fafafa' } : {})
+  }
+
+  return (
+    <tr {...props} ref={setNodeRef} style={style} {...attributes}>
+      {React.Children.map(children, (child) => {
+        if (child.key === 'drag') {
+          return React.cloneElement(child, {
+            children: (
+              <HolderOutlined
+                style={{ cursor: 'grab', color: '#999' }}
+                {...listeners}
+              />
+            )
+          })
+        }
+        return child
+      })}
+    </tr>
+  )
+}
+
 const BrowserPage = () => {
   const [connectionStatus, setConnectionStatus] = useState(null)
+  const [hubstudioStatus, setHubstudioStatus] = useState(null)
   const [profiles, setProfiles] = useState([])
   const [testing, setTesting] = useState(false)
+  const [testingHubstudio, setTestingHubstudio] = useState(false)
   const [loading, setLoading] = useState(false)
   const [modalVisible, setModalVisible] = useState(false)
   const [editingProfile, setEditingProfile] = useState(null)
+  const [selectedBrowserType, setSelectedBrowserType] = useState('bitbrowser')
   const [form] = Form.useForm()
 
   const testConnection = async () => {
     setTesting(true)
+    setTestingHubstudio(true)
     try {
-      const result = await window.electron.browser.test()
-      setConnectionStatus(result)
-      if (result.success) {
-        message.success('连接成功！')
+      // 测试 BitBrowser
+      const bitResult = await window.electron.browser.test()
+      setConnectionStatus(bitResult)
+
+      // 测试 HubStudio
+      const hubResult = await window.electron.hubstudio.test()
+      setHubstudioStatus(hubResult)
+
+      if (bitResult.success || hubResult.success) {
         loadProfiles()
-      } else {
-        message.error(result.message || '连接失败')
+      }
+
+      if (bitResult.success) {
+        message.success('BitBrowser 连接成功！')
+      }
+      if (hubResult.success) {
+        message.success('HubStudio 连接成功！')
+      }
+      if (!bitResult.success && !hubResult.success) {
+        message.warning('所有浏览器连接均失败')
       }
     } catch (error) {
       message.error(`测试失败: ${error.message}`)
       setConnectionStatus({ success: false, error: error.message })
     } finally {
       setTesting(false)
+      setTestingHubstudio(false)
     }
   }
 
   const loadProfiles = async () => {
     setLoading(true)
     try {
-      // 从数据库读取已添加的账号配置
+      // Phase 1: 快速加载数据并显示（不等待状态检查）
       const dbProfiles = await window.electron.db.getBrowserProfiles()
       console.log('BrowserPage - 数据库账号列表:', dbProfiles)
 
       if (!dbProfiles || !Array.isArray(dbProfiles)) {
         setProfiles([])
+        setLoading(false)
         return
       }
 
-      // 从比特浏览器 API 获取所有配置状态
-      const bitBrowserResult = await window.electron.browser.list()
-      const bitBrowserProfiles = bitBrowserResult?.data?.list || []
+      // 并行获取浏览器列表元数据 (不包括状态)
+      const [bitBrowserResult, hubstudioResult] = await Promise.all([
+        window.electron.browser.list().catch(e => ({ data: { list: [] } })),
+        window.electron.hubstudio.list().catch(e => ({ data: { list: [] } }))
+      ])
 
-      // 合并数据并检查运行状态
-      const mergedProfiles = await Promise.all(
-        dbProfiles.map(async (dbProfile) => {
-          // 根据 bit_browser_id 查找对应的比特浏览器配置
+      const bitBrowserProfiles = bitBrowserResult?.data?.list || []
+      const hubstudioProfiles = hubstudioResult?.data?.list || []
+
+      // 初始合并（状态设为未知或默认）
+      const initialProfiles = dbProfiles.map((dbProfile) => {
+        const browserType = dbProfile.browser_type || 'bitbrowser'
+        let remark = ''
+        let browserStatus = 'not_found'
+
+        if (browserType === 'hubstudio') {
+          const bitBrowserIdStr = String(dbProfile.bit_browser_id)
+          const hubProfile = hubstudioProfiles.find(
+            (hp) => {
+              const containerCodeStr = String(hp.containerCode || '')
+              const idStr = String(hp.id || '')
+              const envIdStr = String(hp.envId || '')
+              const profileIdStr = String(hp.profileId || '')
+              return containerCodeStr === bitBrowserIdStr ||
+                idStr === bitBrowserIdStr ||
+                envIdStr === bitBrowserIdStr ||
+                profileIdStr === bitBrowserIdStr
+            }
+          )
+          if (hubProfile) {
+            browserStatus = 'active'
+            remark = hubProfile.containerName || hubProfile.name || ''
+          }
+        } else {
+          // BitBrowser
           const bitProfile = bitBrowserProfiles.find(
             (bp) => bp.id === dbProfile.bit_browser_id
           )
-
-          // 检查浏览器是否正在运行
-          let isRunning = false
           if (bitProfile) {
-            try {
-              const statusResult = await window.electron.browser.checkStatus(dbProfile.bit_browser_id)
-              console.log(`Browser ${dbProfile.name} (${dbProfile.bit_browser_id}) status:`, statusResult)
-
-              // 比特浏览器 API 可能返回的格式：
-              // { success: true, data: { status: 'Active' } } 或
-              // { data: { status: 'Active' } } 或
-              // { status: 'Active' }
-              isRunning = statusResult?.data?.status === 'Active' ||
-                         statusResult?.status === 'Active' ||
-                         statusResult?.data?.status === 'active'
-            } catch (error) {
-              console.error('Failed to check browser status:', error)
-            }
+            browserStatus = 'active'
+            remark = bitProfile?.remark || ''
           }
+        }
 
-          return {
-            ...dbProfile,
-            // 添加比特浏览器的额外信息
-            remark: bitProfile?.remark || '',
-            proxyType: bitProfile?.proxyType || '',
-            browserStatus: bitProfile ? 'active' : 'not_found',
-            isRunning: isRunning
-          }
-        })
-      )
+        return {
+          ...dbProfile,
+          remark,
+          browserStatus,
+          isRunning: false // 初始暂设为 false，稍后更新
+        }
+      })
 
-      console.log('BrowserPage - 合并后的账号列表:', mergedProfiles)
-      setProfiles(mergedProfiles)
+      // 立即更新 UI
+      setProfiles(initialProfiles)
+      setLoading(false)
+
+      // Phase 2: 后台异步检查运行状态 (Running Status)
+      checkRunningStatuses(initialProfiles)
+
     } catch (error) {
       console.error('Failed to load profiles:', error)
-    } finally {
       setLoading(false)
     }
+  }
+
+  // 独立的状态检查函数
+  const checkRunningStatuses = async (currentProfiles) => {
+    // 1. 批量检查 HubStudio 状态
+    const hubStudioProfiles = currentProfiles.filter(p => p.browser_type === 'hubstudio' && p.browserStatus === 'active')
+    const hubStudioIds = hubStudioProfiles.map(p => p.bit_browser_id)
+
+    let hubStudioStatusMap = {}
+    if (hubStudioIds.length > 0) {
+      try {
+        console.log('Batch checking HubStudio status for:', hubStudioIds)
+        const batchResult = await window.electron.hubstudio.batchStatus(hubStudioIds)
+        if (batchResult.success) {
+          hubStudioStatusMap = batchResult.data
+        }
+      } catch (e) {
+        console.error('Failed to batch check HubStudio:', e)
+      }
+    }
+
+    // 2. 逐个检查 BitBrowser 状态 (本地服务通常较快，暂保持逐个检查或后续优化)
+    //为了不阻塞渲染，我们使用 Promise.all 但不 await 它的整体结果来阻塞上面的 HubStudio，
+    //而是获取所有结果后一次性更新，或者分批更新。这里选择一次性更新。
+
+    const bitBrowserProfiles = currentProfiles.filter(p => p.browser_type !== 'hubstudio' && p.browserStatus === 'active')
+    const bitBrowserStatusMap = {}
+
+    await Promise.all(bitBrowserProfiles.map(async (p) => {
+      try {
+        const statusResult = await window.electron.browser.checkStatus(p.bit_browser_id)
+        const isRunning = statusResult?.data?.status === 'Active' ||
+          statusResult?.status === 'Active' ||
+          statusResult?.data?.status === 'active'
+        if (isRunning) {
+          bitBrowserStatusMap[p.bit_browser_id] = true
+        }
+      } catch (e) {
+        // ignore
+      }
+    }))
+
+    // 3. 更新所有状态
+    setProfiles((prevProfiles) => {
+      return prevProfiles.map(p => {
+        let isRunning = false
+        if (p.browser_type === 'hubstudio') {
+          // HubStudio 使用批量结果
+          const status = hubStudioStatusMap[p.bit_browser_id] // 'Active' or 'Inactive'
+          isRunning = status === 'Active'
+        } else {
+          // BitBrowser 使用 Map 结果
+          isRunning = !!bitBrowserStatusMap[p.bit_browser_id]
+        }
+
+        // 只有状态改变时才更新，避免不必要的重渲染 (React 会自动处理，但逻辑上明确点也好)
+        return {
+          ...p,
+          isRunning
+        }
+      })
+    })
   }
 
   useEffect(() => {
@@ -191,8 +340,11 @@ const BrowserPage = () => {
     setEditingProfile(null)
     form.resetFields()
     form.setFieldsValue({
-      defaultTimezone: 'Asia/Shanghai'
+      defaultTimezone: 'Asia/Shanghai',
+      accountType: 'normal',
+      browserType: 'bitbrowser'
     })
+    setSelectedBrowserType('bitbrowser')
     setModalVisible(true)
   }
 
@@ -209,13 +361,18 @@ const BrowserPage = () => {
       }
     }
 
+    const browserType = profile.browser_type || 'bitbrowser'
+    setSelectedBrowserType(browserType)
+
     form.setFieldsValue({
       name: profile.name,
-      bitBrowserId: profile.id,
+      bitBrowserId: profile.bit_browser_id,
       folderPath: profile.folder_path,
       defaultTimezone: profile.default_timezone || 'Asia/Shanghai',
       defaultDescription: profile.default_description,
-      defaultTags: defaultTags
+      defaultTags: defaultTags,
+      accountType: profile.account_type || 'normal',
+      browserType: browserType
     })
     setModalVisible(true)
   }
@@ -265,7 +422,9 @@ const BrowserPage = () => {
         folderPath: values.folderPath,
         defaultTimezone: values.defaultTimezone,
         defaultDescription: values.defaultDescription,
-        defaultTags: tagsJson
+        defaultTags: tagsJson,
+        accountType: values.accountType,
+        browserType: values.browserType || 'bitbrowser'
       }
 
       if (editingProfile) {
@@ -289,21 +448,93 @@ const BrowserPage = () => {
     }
   }
 
+  // 拖拽排序传感器配置
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: {
+        distance: 1
+      }
+    }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates
+    })
+  )
+
+  // 处理拖拽结束
+  const handleDragEnd = async (event) => {
+    const { active, over } = event
+    console.log('拖拽结束:', { activeId: active.id, overId: over?.id })
+
+    if (active.id !== over?.id) {
+      const oldIndex = profiles.findIndex((item) => item.id === active.id)
+      const newIndex = profiles.findIndex((item) => item.id === over?.id)
+      console.log('拖拽位置变化:', { oldIndex, newIndex })
+
+      const newProfiles = arrayMove(profiles, oldIndex, newIndex)
+      setProfiles(newProfiles)
+
+      // 更新排序到数据库
+      try {
+        const orderedProfiles = newProfiles.map((p, index) => ({
+          id: p.id,
+          sort_order: index
+        }))
+        console.log('发送排序数据:', orderedProfiles)
+        const result = await window.electron.db.updateProfilesOrder(orderedProfiles)
+        console.log('保存排序结果:', result)
+        if (result && result.success) {
+          message.success('排序已保存')
+        } else {
+          message.warning('排序可能未保存成功')
+          loadProfiles()
+        }
+      } catch (error) {
+        console.error('保存排序失败:', error)
+        message.error('保存排序失败')
+        // 恢复原来的顺序
+        loadProfiles()
+      }
+    }
+  }
+
   const columns = [
     {
-      title: 'ID',
-      dataIndex: 'id',
-      key: 'id',
-      width: 80
+      key: 'drag',
+      width: 40,
+      render: () => <HolderOutlined style={{ cursor: 'grab', color: '#999' }} />
     },
     {
       title: '名称',
       dataIndex: 'name',
       key: 'name',
-      width: 150
+      width: 120
     },
     {
-      title: '比特浏览器ID',
+      title: '浏览器类型',
+      dataIndex: 'browser_type',
+      key: 'browser_type',
+      width: 110,
+      render: (type) => {
+        if (type === 'hubstudio') {
+          return <Typography.Text style={{ color: '#722ed1' }}>HubStudio</Typography.Text>
+        }
+        return <Typography.Text style={{ color: '#1890ff' }}>BitBrowser</Typography.Text>
+      }
+    },
+    {
+      title: '账号类型',
+      dataIndex: 'account_type',
+      key: 'account_type',
+      width: 90,
+      render: (type) => {
+        if (type === 'monetized') {
+          return <Typography.Text type="success">创收号</Typography.Text>
+        }
+        return <Typography.Text>普通号</Typography.Text>
+      }
+    },
+    {
+      title: '浏览器ID',
       dataIndex: 'bit_browser_id',
       key: 'bit_browser_id',
       width: 150,
@@ -350,6 +581,7 @@ const BrowserPage = () => {
       title: '文件夹路径',
       dataIndex: 'folder_path',
       key: 'folder_path',
+      width: 250,
       ellipsis: true
     },
     {
@@ -365,42 +597,46 @@ const BrowserPage = () => {
     {
       title: '操作',
       key: 'action',
-      width: 150,
+      width: 80,
+      fixed: 'right',
       render: (_, record) => (
-        <Space size="small">
-          <Button
-            type="link"
-            size="small"
-            icon={<EditOutlined />}
-            onClick={() => handleEditProfile(record)}
-          >
-            编辑
-          </Button>
-          <Button
-            type="link"
-            size="small"
-            danger
-            icon={<DeleteOutlined />}
-            onClick={() => handleDeleteProfile(record.id)}
-          >
-            删除
-          </Button>
-        </Space>
+        <Dropdown
+          menu={{
+            items: [
+              {
+                key: 'edit',
+                icon: <EditOutlined />,
+                label: '编辑',
+                onClick: () => handleEditProfile(record)
+              },
+              {
+                key: 'delete',
+                icon: <DeleteOutlined />,
+                label: '删除',
+                danger: true,
+                onClick: () => handleDeleteProfile(record.id)
+              }
+            ]
+          }}
+          trigger={['click']}
+        >
+          <Button type="text" icon={<MoreOutlined />} />
+        </Dropdown>
       )
     }
   ]
 
   return (
     <div>
-      <Title level={2}>比特浏览器配置</Title>
+      <Title level={2}>发布账号管理</Title>
 
       <div style={{ marginBottom: 24 }}>
         <Space>
           <Button
             icon={<SyncOutlined />}
             onClick={testConnection}
-            loading={testing}
-            type={connectionStatus?.success ? 'primary' : 'default'}
+            loading={testing || testingHubstudio}
+            type={(connectionStatus?.success || hubstudioStatus?.success) ? 'primary' : 'default'}
           >
             测试连接
           </Button>
@@ -412,29 +648,50 @@ const BrowserPage = () => {
             添加账号
           </Button>
         </Space>
-        {connectionStatus && (
-          <div style={{ marginTop: 12 }}>
-            <Typography.Text
-              type={connectionStatus.success ? 'success' : 'danger'}
-            >
-              {connectionStatus.success
-                ? '✅ 比特浏览器连接正常'
-                : `❌ ${connectionStatus.message || '连接失败'}`}
-            </Typography.Text>
-          </div>
-        )}
+        <div style={{ marginTop: 12 }}>
+          <Space size={16}>
+            {connectionStatus && (
+              <Typography.Text type={connectionStatus.success ? 'success' : 'secondary'}>
+                {connectionStatus.success ? '✅ BitBrowser 已连接' : '○ BitBrowser 未连接'}
+              </Typography.Text>
+            )}
+            {hubstudioStatus && (
+              <Typography.Text type={hubstudioStatus.success ? 'success' : 'secondary'}>
+                {hubstudioStatus.success ? '✅ HubStudio 已连接' : '○ HubStudio 未连接'}
+              </Typography.Text>
+            )}
+          </Space>
+        </div>
       </div>
 
-      {connectionStatus?.success && (
+      {(connectionStatus?.success || hubstudioStatus?.success) && (
         <>
           <Title level={4}>浏览器配置列表</Title>
-          <Table
-            columns={columns}
-            dataSource={profiles}
-            rowKey="id"
-            loading={loading}
-            pagination={{ pageSize: 10 }}
-          />
+          <DndContext
+            sensors={sensors}
+            collisionDetection={closestCenter}
+            onDragEnd={handleDragEnd}
+            modifiers={[restrictToVerticalAxis]}
+          >
+            <SortableContext
+              items={profiles.map((p) => p.id)}
+              strategy={verticalListSortingStrategy}
+            >
+              <Table
+                columns={columns}
+                dataSource={profiles}
+                rowKey="id"
+                loading={loading}
+                pagination={false}
+                scroll={{ x: 1200 }}
+                components={{
+                  body: {
+                    row: SortableRow
+                  }
+                }}
+              />
+            </SortableContext>
+          </DndContext>
         </>
       )}
 
@@ -461,11 +718,36 @@ const BrowserPage = () => {
           </Form.Item>
 
           <Form.Item
-            label="比特浏览器ID"
-            name="bitBrowserId"
-            rules={[{ required: true, message: '请输入比特浏览器ID' }]}
+            label="浏览器类型"
+            name="browserType"
+            rules={[{ required: true, message: '请选择浏览器类型' }]}
           >
-            <Input placeholder="请输入比特浏览器ID" />
+            <Select
+              placeholder="请选择浏览器类型"
+              options={BROWSER_TYPES}
+              onChange={(value) => setSelectedBrowserType(value)}
+            />
+          </Form.Item>
+
+          <Form.Item
+            label={selectedBrowserType === 'hubstudio' ? 'HubStudio Profile ID' : 'BitBrowser ID'}
+            name="bitBrowserId"
+            rules={[{ required: true, message: `请输入${selectedBrowserType === 'hubstudio' ? 'HubStudio Profile ID' : 'BitBrowser ID'}` }]}
+            tooltip={selectedBrowserType === 'hubstudio' ? '从 HubStudio 浏览器列表中复制 Profile ID' : '从比特浏览器列表中复制浏览器 ID'}
+          >
+            <Input placeholder={`请输入${selectedBrowserType === 'hubstudio' ? 'HubStudio Profile ID' : 'BitBrowser ID'}`} />
+          </Form.Item>
+
+          <Form.Item
+            label="账号类型"
+            name="accountType"
+            rules={[{ required: true, message: '请选择账号类型' }]}
+            tooltip="普通号和创收号的发布流程不同"
+          >
+            <Select
+              placeholder="请选择账号类型"
+              options={ACCOUNT_TYPES}
+            />
           </Form.Item>
 
           <Form.Item

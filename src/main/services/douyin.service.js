@@ -1,11 +1,5 @@
 const { chromium } = require('playwright-core')
-const path = require('path')
-const os = require('os')
-const fs = require('fs')
-const { exec, spawn } = require('child_process')
-
-// 远程调试端口
-const REMOTE_DEBUGGING_PORT = 9222
+const axios = require('axios')
 
 class DouyinService {
   constructor() {
@@ -14,446 +8,92 @@ class DouyinService {
     this.page = null
     this.isRunning = false
     this.collectedVideos = []
-    this.currentProfile = null
-    this.chromeProcess = null
+    this.currentAccountId = null
+    this.currentBrowserId = null
+    // 比特浏览器 API 地址
+    this.apiUrl = 'http://127.0.0.1:54345'
+    this.client = axios.create({ proxy: false })
   }
 
   /**
-   * 获取 Chrome 用户数据目录
-   * @returns {string} Chrome 用户数据目录路径
-   */
-  getChromeUserDataDir() {
-    const platform = process.platform
-    const homeDir = os.homedir()
-
-    if (platform === 'win32') {
-      return path.join(homeDir, 'AppData', 'Local', 'Google', 'Chrome', 'User Data')
-    } else if (platform === 'darwin') {
-      return path.join(homeDir, 'Library', 'Application Support', 'Google', 'Chrome')
-    } else {
-      return path.join(homeDir, '.config', 'google-chrome')
-    }
-  }
-
-  /**
-   * 获取 Chrome 可执行文件路径
-   * @returns {string} Chrome 可执行文件路径
-   */
-  getChromePath() {
-    const platform = process.platform
-
-    if (platform === 'win32') {
-      // Windows 上常见的 Chrome 路径
-      const possiblePaths = [
-        path.join(process.env['PROGRAMFILES'], 'Google', 'Chrome', 'Application', 'chrome.exe'),
-        path.join(process.env['PROGRAMFILES(X86)'] || '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
-        path.join(os.homedir(), 'AppData', 'Local', 'Google', 'Chrome', 'Application', 'chrome.exe')
-      ]
-
-      for (const chromePath of possiblePaths) {
-        if (fs.existsSync(chromePath)) {
-          return chromePath
-        }
-      }
-    } else if (platform === 'darwin') {
-      return '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
-    } else {
-      return '/usr/bin/google-chrome'
-    }
-
-    return null
-  }
-
-  /**
-   * 检测远程调试端口是否可用
-   * @returns {Promise<Object>} 检测结果
-   */
-  async checkDebugPort() {
-    return new Promise((resolve) => {
-      const http = require('http')
-
-      const req = http.get(`http://127.0.0.1:${REMOTE_DEBUGGING_PORT}/json/version`, (res) => {
-        let data = ''
-        res.on('data', chunk => data += chunk)
-        res.on('end', () => {
-          try {
-            const info = JSON.parse(data)
-            console.log('[Douyin] Chrome debug port available:', info.Browser)
-            resolve({
-              available: true,
-              browser: info.Browser,
-              webSocketDebuggerUrl: info.webSocketDebuggerUrl,
-              message: `Chrome 调试模式已就绪 (${info.Browser})`
-            })
-          } catch (e) {
-            resolve({
-              available: false,
-              message: '无法解析 Chrome 调试信息'
-            })
-          }
-        })
-      })
-
-      req.on('error', () => {
-        resolve({
-          available: false,
-          message: `Chrome 调试端口 ${REMOTE_DEBUGGING_PORT} 未开启`
-        })
-      })
-
-      req.setTimeout(3000, () => {
-        req.destroy()
-        resolve({
-          available: false,
-          message: '连接超时'
-        })
-      })
-    })
-  }
-
-  /**
-   * 检测 Chrome 是否正在运行（同时检测调试模式）
-   * @returns {Promise<Object>} 检测结果
-   */
-  async checkChromeRunning() {
-    // 首先检查远程调试端口
-    const debugStatus = await this.checkDebugPort()
-
-    if (debugStatus.available) {
-      return {
-        running: true,
-        debugMode: true,
-        message: debugStatus.message,
-        webSocketDebuggerUrl: debugStatus.webSocketDebuggerUrl
-      }
-    }
-
-    // 检查普通 Chrome 进程
-    return new Promise((resolve) => {
-      const platform = process.platform
-
-      let command
-      if (platform === 'win32') {
-        // 使用 tasklist 更可靠地检测
-        command = 'tasklist /FI "IMAGENAME eq chrome.exe" /NH'
-      } else if (platform === 'darwin') {
-        command = 'pgrep -x "Google Chrome"'
-      } else {
-        command = 'pgrep -x chrome'
-      }
-
-      exec(command, (error, stdout, stderr) => {
-        if (platform === 'win32') {
-          const output = stdout.trim().toLowerCase()
-          // tasklist 如果没有找到进程会返回 "信息: 没有运行的任务匹配指定标准" 或 "INFO: No tasks"
-          const isRunning = output.includes('chrome.exe')
-
-          console.log('[Douyin] Chrome check (tasklist) - output:', output.substring(0, 100))
-          console.log('[Douyin] Chrome check - isRunning:', isRunning, 'debugMode: false')
-
-          resolve({
-            running: isRunning,
-            debugMode: false,
-            message: isRunning
-              ? 'Chrome 正在运行（非调试模式）- 请先关闭 Chrome，然后点击"启动调试模式"'
-              : 'Chrome 未运行 - 请点击"启动调试模式"按钮'
-          })
-        } else {
-          const isRunning = !error && stdout.trim().length > 0
-          resolve({
-            running: isRunning,
-            debugMode: false,
-            message: isRunning
-              ? 'Chrome 正在运行（非调试模式）- 请先关闭 Chrome'
-              : 'Chrome 未运行 - 请点击"启动调试模式"按钮'
-          })
-        }
-      })
-    })
-  }
-
-  /**
-   * 强制关闭所有 Chrome 进程
-   * @returns {Promise<Object>} 操作结果
-   */
-  async killAllChrome() {
-    return new Promise((resolve) => {
-      const platform = process.platform
-
-      let command
-      if (platform === 'win32') {
-        command = 'taskkill /F /IM chrome.exe /T 2>nul'
-      } else if (platform === 'darwin') {
-        command = 'pkill -9 "Google Chrome"'
-      } else {
-        command = 'pkill -9 chrome'
-      }
-
-      console.log('[Douyin] Killing all Chrome processes...')
-
-      exec(command, (error, stdout, stderr) => {
-        // 等待一下让进程完全退出
-        setTimeout(() => {
-          console.log('[Douyin] Chrome kill command executed')
-          resolve({
-            success: true,
-            message: '已尝试关闭所有 Chrome 进程'
-          })
-        }, 1000)
-      })
-    })
-  }
-
-  /**
-   * 获取所有 Chrome 配置文件
-   * @returns {Promise<Array>} 配置文件列表
-   */
-  async getChromeProfiles() {
-    const userDataDir = this.getChromeUserDataDir()
-    const profiles = []
-
-    try {
-      // 读取 Local State 文件获取配置文件信息
-      const localStatePath = path.join(userDataDir, 'Local State')
-
-      if (fs.existsSync(localStatePath)) {
-        const localState = JSON.parse(fs.readFileSync(localStatePath, 'utf8'))
-        const profileInfo = localState.profile?.info_cache || {}
-
-        for (const [profileDir, info] of Object.entries(profileInfo)) {
-          const profilePath = path.join(userDataDir, profileDir)
-
-          // 检查配置文件目录是否存在
-          if (fs.existsSync(profilePath)) {
-            profiles.push({
-              id: profileDir,
-              name: info.name || profileDir,
-              shortcutName: info.shortcut_name || info.name || profileDir,
-              path: profilePath,
-              isDefault: profileDir === 'Default',
-              avatarIcon: info.avatar_icon || null,
-              gaiaName: info.gaia_name || null,
-              userName: info.user_name || null,
-              lastActive: info.active_time || null
-            })
-          }
-        }
-      }
-
-      // 如果没有从 Local State 获取到，尝试直接扫描目录
-      if (profiles.length === 0) {
-        const entries = fs.readdirSync(userDataDir, { withFileTypes: true })
-
-        for (const entry of entries) {
-          if (entry.isDirectory()) {
-            // Chrome 配置文件夹通常是 "Default" 或 "Profile X"
-            if (entry.name === 'Default' || entry.name.startsWith('Profile ')) {
-              const prefsPath = path.join(userDataDir, entry.name, 'Preferences')
-
-              if (fs.existsSync(prefsPath)) {
-                try {
-                  const prefs = JSON.parse(fs.readFileSync(prefsPath, 'utf8'))
-                  profiles.push({
-                    id: entry.name,
-                    name: prefs.profile?.name || entry.name,
-                    path: path.join(userDataDir, entry.name),
-                    isDefault: entry.name === 'Default'
-                  })
-                } catch (e) {
-                  profiles.push({
-                    id: entry.name,
-                    name: entry.name,
-                    path: path.join(userDataDir, entry.name),
-                    isDefault: entry.name === 'Default'
-                  })
-                }
-              }
-            }
-          }
-        }
-      }
-
-      // 按名称排序，Default 排第一
-      profiles.sort((a, b) => {
-        if (a.isDefault) return -1
-        if (b.isDefault) return 1
-        return a.name.localeCompare(b.name)
-      })
-
-      console.log('[Douyin] Found Chrome profiles:', profiles.map(p => p.name))
-      return profiles
-
-    } catch (error) {
-      console.error('[Douyin] Failed to get Chrome profiles:', error)
-      return []
-    }
-  }
-
-  /**
-   * 启动 Chrome 调试模式
-   * @param {string} profileId - 配置文件ID（如 "Default" 或 "Profile 1"）
+   * 启动比特浏览器
+   * @param {string} browserId - 比特浏览器ID
    * @returns {Promise<Object>} 启动结果
    */
-  async startChromeDebugMode(profileId = 'Default') {
-    console.log('[Douyin] Starting Chrome in debug mode with profile:', profileId)
+  async launchBrowser(browserId) {
+    console.log('[Douyin] launchBrowser called with browserId:', browserId)
 
-    // 检查是否已经有调试模式的 Chrome 在运行
-    const debugStatus = await this.checkDebugPort()
-    if (debugStatus.available) {
-      return {
-        success: true,
-        message: 'Chrome 调试模式已在运行',
-        alreadyRunning: true
-      }
+    if (this.browser && this.currentBrowserId === browserId) {
+      console.log('[Douyin] Already connected to this browser')
+      return { success: true, message: '已连接到浏览器' }
     }
 
-    // 检查是否有普通 Chrome 在运行
-    const chromeStatus = await this.checkChromeRunning()
-    if (chromeStatus.running && !chromeStatus.debugMode) {
-      return {
-        success: false,
-        error: '检测到 Chrome 正在运行（非调试模式）。请先完全关闭所有 Chrome 窗口和后台进程，然后再启动调试模式。',
-        needCloseChrome: true
-      }
-    }
-
-    // 获取 Chrome 路径
-    const chromePath = this.getChromePath()
-    if (!chromePath) {
-      return {
-        success: false,
-        error: '找不到 Chrome 浏览器，请确保已安装 Google Chrome'
-      }
-    }
-
-    console.log('[Douyin] Chrome path:', chromePath)
-
-    const userDataDir = this.getChromeUserDataDir()
-
-    // 构建启动参数
-    const args = [
-      `--remote-debugging-port=${REMOTE_DEBUGGING_PORT}`,
-      `--user-data-dir=${userDataDir}`,
-      `--profile-directory=${profileId}`,
-      '--no-first-run',
-      '--no-default-browser-check'
-    ]
-
-    console.log('[Douyin] Starting Chrome with args:', args)
-
-    return new Promise((resolve) => {
-      try {
-        // 使用 spawn 启动 Chrome（不等待进程结束）
-        this.chromeProcess = spawn(chromePath, args, {
-          detached: true,
-          stdio: 'ignore'
-        })
-
-        this.chromeProcess.unref()
-
-        // 等待调试端口可用
-        let attempts = 0
-        const maxAttempts = 20
-        const checkInterval = setInterval(async () => {
-          attempts++
-          const status = await this.checkDebugPort()
-
-          if (status.available) {
-            clearInterval(checkInterval)
-            console.log('[Douyin] Chrome debug mode started successfully')
-            resolve({
-              success: true,
-              message: 'Chrome 调试模式启动成功',
-              profile: profileId
-            })
-          } else if (attempts >= maxAttempts) {
-            clearInterval(checkInterval)
-            console.error('[Douyin] Timeout waiting for debug port')
-            resolve({
-              success: false,
-              error: '等待 Chrome 调试端口超时，请重试'
-            })
-          }
-        }, 500)
-
-      } catch (error) {
-        console.error('[Douyin] Failed to start Chrome:', error)
-        resolve({
-          success: false,
-          error: `启动 Chrome 失败: ${error.message}`
-        })
-      }
-    })
-  }
-
-  /**
-   * 连接到已运行的 Chrome 浏览器（使用远程调试）
-   * @param {string} profileId - 配置文件ID（仅用于记录）
-   * @returns {Promise<Object>} 连接结果
-   */
-  async launchBrowser(profileId = 'Default') {
-    console.log('[Douyin] launchBrowser (connect mode) called')
-
+    // 如果已连接到其他浏览器，先断开
     if (this.browser) {
-      console.log('[Douyin] Already connected to browser')
-      return { success: true, message: '已连接到浏览器', profile: this.currentProfile }
+      await this.closeBrowser()
     }
 
     try {
-      // 检查调试端口是否可用
-      const debugStatus = await this.checkDebugPort()
+      // 调用比特浏览器 API 启动浏览器
+      console.log('[Douyin] Starting BitBrowser with ID:', browserId)
 
-      if (!debugStatus.available) {
+      const response = await this.client.post(`${this.apiUrl}/browser/open`, {
+        id: browserId
+      }, { timeout: 30000 })
+
+      console.log('[Douyin] BitBrowser API response:', JSON.stringify(response.data))
+
+      if (!response.data.success) {
         return {
           success: false,
-          error: 'Chrome 调试模式未启动。请先点击"启动调试模式"按钮启动 Chrome。',
-          needStartDebugMode: true
+          error: response.data.msg || '启动浏览器失败'
         }
       }
 
-      console.log('[Douyin] Connecting to Chrome via CDP...')
+      const { ws, http } = response.data.data
+      console.log('[Douyin] WebSocket URL:', ws)
+      console.log('[Douyin] HTTP endpoint:', http)
 
-      // 使用 CDP 连接到运行中的 Chrome
-      this.browser = await chromium.connectOverCDP(`http://127.0.0.1:${REMOTE_DEBUGGING_PORT}`)
+      // 使用 Playwright 连接到浏览器
+      // connectOverCDP 需要完整的 HTTP URL
+      const cdpEndpoint = http ? `http://${http}` : ws
+      console.log('[Douyin] Connecting to CDP endpoint:', cdpEndpoint)
+      this.browser = await chromium.connectOverCDP(cdpEndpoint)
+      console.log('[Douyin] Connected to browser via CDP')
 
-      console.log('[Douyin] Connected to Chrome successfully')
-
-      // 获取默认上下文
+      // 获取上下文和页面
       const contexts = this.browser.contexts()
       this.context = contexts.length > 0 ? contexts[0] : await this.browser.newContext()
 
-      // 获取或创建页面
       const pages = this.context.pages()
       this.page = pages.length > 0 ? pages[0] : await this.context.newPage()
-      this.currentProfile = profileId
 
-      console.log('[Douyin] Browser connected successfully')
+      this.currentBrowserId = browserId
+
+      console.log('[Douyin] Browser launched successfully')
 
       return {
         success: true,
-        message: '已连接到 Chrome 浏览器',
-        profile: profileId
+        message: '浏览器启动成功'
       }
 
     } catch (error) {
-      console.error('[Douyin] Failed to connect to browser:', error)
-      console.error('[Douyin] Error message:', error.message)
+      console.error('[Douyin] Failed to launch browser:', error)
 
       // 清理状态
       this.browser = null
       this.context = null
       this.page = null
-      this.currentProfile = null
+      this.currentBrowserId = null
 
-      if (error.message.includes('connect')) {
+      if (error.code === 'ECONNREFUSED') {
         return {
           success: false,
-          error: '无法连接到 Chrome。请确保 Chrome 已使用调试模式启动。',
-          needStartDebugMode: true
+          error: '无法连接到比特浏览器，请确保比特浏览器已启动'
         }
       }
 
-      return { success: false, error: `连接失败: ${error.message}` }
+      return { success: false, error: `启动失败: ${error.message}` }
     }
   }
 
@@ -477,7 +117,6 @@ class DouyinService {
       // 等待页面加载
       await this.page.waitForTimeout(3000)
 
-      // 检查是否需要登录
       const currentUrl = this.page.url()
       console.log('[Douyin] Current URL:', currentUrl)
 
@@ -724,30 +363,40 @@ class DouyinService {
   }
 
   /**
-   * 断开与浏览器的连接（不关闭 Chrome）
+   * 关闭浏览器连接
    * @returns {Promise<Object>} 操作结果
    */
   async closeBrowser() {
     try {
+      // 调用比特浏览器 API 关闭浏览器
+      if (this.currentBrowserId) {
+        try {
+          await this.client.post(`${this.apiUrl}/browser/close`, {
+            id: this.currentBrowserId
+          })
+          console.log('[Douyin] BitBrowser closed via API')
+        } catch (e) {
+          console.log('[Douyin] Failed to close browser via API:', e.message)
+        }
+      }
+
       if (this.browser) {
-        // 断开连接（不关闭 Chrome，用户可以继续使用）
-        await this.browser.close()
+        await this.browser.close().catch(() => {})
         console.log('[Douyin] Disconnected from browser')
       }
 
       this.browser = null
       this.context = null
       this.page = null
-      this.currentProfile = null
+      this.currentBrowserId = null
 
-      return { success: true, message: '已断开浏览器连接' }
+      return { success: true, message: '浏览器已关闭' }
     } catch (error) {
-      console.error('[Douyin] Failed to disconnect browser:', error)
-      // 即使出错也重置状态
+      console.error('[Douyin] Failed to close browser:', error)
       this.browser = null
       this.context = null
       this.page = null
-      this.currentProfile = null
+      this.currentBrowserId = null
       return { success: false, error: error.message }
     }
   }
@@ -758,10 +407,10 @@ class DouyinService {
    */
   getStatus() {
     return {
-      browserRunning: !!this.context,
+      browserRunning: !!this.browser,
       isCollecting: this.isRunning,
       collectedCount: this.collectedVideos.length,
-      currentProfile: this.currentProfile
+      currentBrowserId: this.currentBrowserId
     }
   }
 
@@ -779,6 +428,141 @@ class DouyinService {
   clearCollectedVideos() {
     this.collectedVideos = []
     return { success: true, message: '已清空采集列表' }
+  }
+
+  /**
+   * 获取页面的 RENDER_DATA 数据
+   * @returns {Promise<Object>} 包含视频列表和作者信息的数据
+   */
+  async getPageData() {
+    if (!this.page) {
+      return { success: false, error: '浏览器未启动' }
+    }
+
+    try {
+      console.log('[Douyin] Extracting page RENDER_DATA...')
+
+      const pageData = await this.page.evaluate(() => {
+        try {
+          // 获取 RENDER_DATA
+          const renderDataElement = document.getElementById('RENDER_DATA')
+          if (!renderDataElement) {
+            return { success: false, error: '未找到 RENDER_DATA 元素' }
+          }
+
+          const rawData = renderDataElement.textContent
+          if (!rawData) {
+            return { success: false, error: 'RENDER_DATA 内容为空' }
+          }
+
+          // 解码和解析数据
+          const decodedData = decodeURIComponent(rawData)
+          const data = JSON.parse(decodedData)
+
+          // 查找包含 awemeList 的数据
+          let awemeList = []
+          let routeData = null
+
+          // 遍历所有键查找数据
+          for (const key in data) {
+            const value = data[key]
+            if (value && typeof value === 'object') {
+              // 查找 recommend 下的 awemeList
+              if (value.recommend && value.recommend.awemeList) {
+                awemeList = value.recommend.awemeList
+                routeData = value
+                break
+              }
+              // 或者直接的 awemeList
+              if (value.awemeList) {
+                awemeList = value.awemeList
+                routeData = value
+                break
+              }
+            }
+          }
+
+          if (awemeList.length === 0) {
+            return { success: false, error: '未找到视频列表数据' }
+          }
+
+          // 提取视频和作者信息
+          const videos = awemeList.map(aweme => {
+            const video = aweme.video || {}
+            const author = aweme.authorInfo || aweme.author || {}
+            const stats = aweme.statistics || aweme.stats || {}
+            const music = aweme.music || {}
+
+            return {
+              // 视频基本信息
+              awemeId: aweme.awemeId || aweme.aweme_id,
+              desc: aweme.desc || '',
+              createTime: aweme.createTime || aweme.create_time,
+
+              // 视频信息
+              video: {
+                playAddr: video.playAddr || video.play_addr,
+                cover: video.cover || video.dynamicCover,
+                duration: video.duration,
+                width: video.width,
+                height: video.height,
+                ratio: video.ratio
+              },
+
+              // 作者信息
+              author: {
+                uid: author.uid,
+                secUid: author.secUid || author.sec_uid,
+                nickname: author.nickname,
+                avatarThumb: author.avatarThumb || author.avatar_thumb,
+                signature: author.signature,
+                followingCount: author.followingCount || author.following_count,
+                followerCount: author.followerCount || author.follower_count
+              },
+
+              // 互动数据
+              statistics: {
+                diggCount: stats.diggCount || stats.digg_count || 0,
+                commentCount: stats.commentCount || stats.comment_count || 0,
+                collectCount: stats.collectCount || stats.collect_count || 0,
+                shareCount: stats.shareCount || stats.share_count || 0,
+                playCount: stats.playCount || stats.play_count || 0
+              },
+
+              // 音乐信息
+              music: {
+                id: music.id,
+                title: music.title,
+                author: music.author,
+                playUrl: music.playUrl || music.play_url
+              },
+
+              // 话题标签
+              textExtra: (aweme.textExtra || []).map(tag => ({
+                hashtagName: tag.hashtagName || tag.hashtag_name,
+                hashtagId: tag.hashtagId || tag.hashtag_id
+              }))
+            }
+          })
+
+          return {
+            success: true,
+            videos,
+            count: videos.length
+          }
+
+        } catch (error) {
+          return { success: false, error: error.message }
+        }
+      })
+
+      console.log(`[Douyin] Extracted ${pageData.count || 0} videos from page data`)
+      return pageData
+
+    } catch (error) {
+      console.error('[Douyin] Failed to extract page data:', error)
+      return { success: false, error: error.message }
+    }
   }
 }
 

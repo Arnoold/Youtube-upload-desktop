@@ -73,6 +73,17 @@ function setupIPC(mainWindow, services) {
     }
   })
 
+  ipcMain.handle('file:open', async (event, filePath) => {
+    try {
+      const { shell } = require('electron')
+      await shell.openPath(filePath)
+      return { success: true }
+    } catch (error) {
+      console.error('file:open error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
   // ===== 比特浏览器相关 =====
 
   ipcMain.handle('browser:test', async () => {
@@ -114,6 +125,18 @@ function setupIPC(mainWindow, services) {
       return await bitBrowserService.checkBrowserStatus(browserId)
     } catch (error) {
       console.error('browser:check-status error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('hubstudio:batch-status', async (event, containerCodes) => {
+    try {
+      if (!hubStudioService) {
+        return { success: false, error: 'HubStudio 服务未初始化' }
+      }
+      return await hubStudioService.getBatchBrowserStatus(containerCodes)
+    } catch (error) {
+      console.error('hubstudio:batch-status error:', error)
       return { success: false, error: error.message }
     }
   })
@@ -239,7 +262,10 @@ function setupIPC(mainWindow, services) {
 
   ipcMain.handle('db:update-profiles-order', async (event, profiles) => {
     try {
-      return dbService.updateBrowserProfilesOrder(profiles)
+      console.log('IPC db:update-profiles-order 收到:', JSON.stringify(profiles))
+      const result = dbService.updateBrowserProfilesOrder(profiles)
+      console.log('IPC db:update-profiles-order 结果:', result)
+      return result
     } catch (error) {
       console.error('db:update-profiles-order error:', error)
       throw error
@@ -1067,47 +1093,62 @@ function setupIPC(mainWindow, services) {
     }
   })
 
-  // ===== 抖音视频采集相关 =====
+  // ===== 采集账号管理相关 =====
 
-  ipcMain.handle('douyin:check-chrome', async () => {
+  ipcMain.handle('collect-account:list', async (event, platform) => {
     try {
-      return await douyinService.checkChromeRunning()
+      return dbService.getCollectAccounts(platform)
     } catch (error) {
-      console.error('douyin:check-chrome error:', error)
-      return { running: false, error: error.message }
-    }
-  })
-
-  ipcMain.handle('douyin:get-profiles', async () => {
-    try {
-      return await douyinService.getChromeProfiles()
-    } catch (error) {
-      console.error('douyin:get-profiles error:', error)
+      console.error('collect-account:list error:', error)
       return []
     }
   })
 
-  ipcMain.handle('douyin:kill-chrome', async () => {
+  ipcMain.handle('collect-account:get', async (event, id) => {
     try {
-      return await douyinService.killAllChrome()
+      return dbService.getCollectAccountById(id)
     } catch (error) {
-      console.error('douyin:kill-chrome error:', error)
+      console.error('collect-account:get error:', error)
+      return null
+    }
+  })
+
+  ipcMain.handle('collect-account:create', async (event, account) => {
+    try {
+      const id = dbService.createCollectAccount(account)
+      return { success: true, id }
+    } catch (error) {
+      console.error('collect-account:create error:', error)
       return { success: false, error: error.message }
     }
   })
 
-  ipcMain.handle('douyin:start-debug-mode', async (event, profileId) => {
+  ipcMain.handle('collect-account:update', async (event, id, account) => {
     try {
-      return await douyinService.startChromeDebugMode(profileId)
+      dbService.updateCollectAccount(id, account)
+      return { success: true }
     } catch (error) {
-      console.error('douyin:start-debug-mode error:', error)
+      console.error('collect-account:update error:', error)
       return { success: false, error: error.message }
     }
   })
 
-  ipcMain.handle('douyin:launch', async (event, profileId) => {
+  ipcMain.handle('collect-account:delete', async (event, id) => {
     try {
-      return await douyinService.launchBrowser(profileId)
+      dbService.deleteCollectAccount(id)
+      return { success: true }
+    } catch (error) {
+      console.error('collect-account:delete error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // ===== 抖音视频采集相关 =====
+
+  // 启动比特浏览器并连接
+  ipcMain.handle('douyin:launch', async (event, browserId) => {
+    try {
+      return await douyinService.launchBrowser(browserId)
     } catch (error) {
       console.error('douyin:launch error:', error)
       return { success: false, error: error.message }
@@ -1206,6 +1247,15 @@ function setupIPC(mainWindow, services) {
     }
   })
 
+  ipcMain.handle('douyin:get-page-data', async () => {
+    try {
+      return await douyinService.getPageData()
+    } catch (error) {
+      console.error('douyin:get-page-data error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
   // ===== 定时任务相关 =====
   const schedulerService = require('./services/scheduler.service')
 
@@ -1278,6 +1328,288 @@ function setupIPC(mainWindow, services) {
     } catch (error) {
       console.error('scheduler:getStatus error:', error)
       throw error
+    }
+  })
+
+  // ===== YouTube 上传相关 =====
+  const YouTubeUploadService = require('./services/youtube-upload.service')
+  const youtubeUploadService = new YouTubeUploadService()
+  youtubeUploadService.initialize(bitBrowserService, hubStudioService, mainWindow)
+
+  // 打开 YouTube Studio
+  ipcMain.handle('youtube:open-studio', async (event, browserId, browserType) => {
+    try {
+      console.log('youtube:open-studio called with browserId:', browserId, 'browserType:', browserType)
+      return await youtubeUploadService.openYouTubeStudio(browserId, browserType || 'bitbrowser')
+    } catch (error) {
+      console.error('youtube:open-studio error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // 点击创建按钮
+  ipcMain.handle('youtube:click-create', async (event, browserId) => {
+    try {
+      return await youtubeUploadService.clickCreateButton(browserId || '')
+    } catch (error) {
+      console.error('youtube:click-create error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // 点击上传视频
+  ipcMain.handle('youtube:click-upload', async (event, browserId) => {
+    try {
+      return await youtubeUploadService.clickUploadVideo(browserId || '')
+    } catch (error) {
+      console.error('youtube:click-upload error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // 选择视频文件
+  ipcMain.handle('youtube:select-file', async (event, browserId, videoPath) => {
+    try {
+      return await youtubeUploadService.selectVideoFile(browserId || '', videoPath)
+    } catch (error) {
+      console.error('youtube:select-file error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // 填写视频详情
+  ipcMain.handle('youtube:fill-details', async (event, browserId, videoInfo) => {
+    try {
+      return await youtubeUploadService.fillVideoDetailsNormal(browserId || '', videoInfo)
+    } catch (error) {
+      console.error('youtube:fill-details error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // 设置非儿童内容
+  ipcMain.handle('youtube:set-not-for-kids', async (event, browserId) => {
+    try {
+      return await youtubeUploadService.setNotMadeForKids(browserId || '')
+    } catch (error) {
+      console.error('youtube:set-not-for-kids error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // 点击下一步
+  ipcMain.handle('youtube:click-next', async (event, browserId, times) => {
+    try {
+      return await youtubeUploadService.clickNextButton(browserId || '', times || 1)
+    } catch (error) {
+      console.error('youtube:click-next error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // 设置可见性
+  ipcMain.handle('youtube:set-visibility', async (event, browserId, visibility) => {
+    try {
+      return await youtubeUploadService.setVisibility(browserId || '', visibility)
+    } catch (error) {
+      console.error('youtube:set-visibility error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // 点击发布
+  ipcMain.handle('youtube:click-publish', async (event, browserId) => {
+    try {
+      return await youtubeUploadService.clickPublishButton(browserId || '')
+    } catch (error) {
+      console.error('youtube:click-publish error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // 完整上传流程（普通号）
+  ipcMain.handle('youtube:upload-normal', async (event, browserId, videoPath, videoInfo, browserType) => {
+    try {
+      return await youtubeUploadService.uploadVideoNormal(browserId, videoPath, videoInfo, browserType || 'bitbrowser')
+    } catch (error) {
+      console.error('youtube:upload-normal error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // 完整上传流程（创收号）
+  ipcMain.handle('youtube:upload-monetized', async (event, browserId, videoPath, videoInfo, browserType) => {
+    try {
+      return await youtubeUploadService.uploadVideoMonetized(browserId, videoPath, videoInfo, browserType || 'bitbrowser')
+    } catch (error) {
+      console.error('youtube:upload-monetized error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // 暂停上传
+  ipcMain.handle('youtube:pause', async () => {
+    try {
+      youtubeUploadService.pause()
+      return { success: true }
+    } catch (error) {
+      console.error('youtube:pause error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // 继续上传
+  ipcMain.handle('youtube:resume', async () => {
+    try {
+      youtubeUploadService.resume()
+      return { success: true }
+    } catch (error) {
+      console.error('youtube:resume error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // 取消上传
+  ipcMain.handle('youtube:cancel', async () => {
+    try {
+      youtubeUploadService.cancel()
+      return { success: true }
+    } catch (error) {
+      console.error('youtube:cancel error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // 获取上传状态
+  ipcMain.handle('youtube:get-status', async () => {
+    try {
+      return { success: true, data: youtubeUploadService.getStatus() }
+    } catch (error) {
+      console.error('youtube:get-status error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // 获取所有正在执行的任务进度（用于页面切换后恢复）
+  ipcMain.handle('youtube:get-all-progress', async () => {
+    try {
+      return { success: true, data: youtubeUploadService.getAllProgress() }
+    } catch (error) {
+      console.error('youtube:get-all-progress error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // 获取指定浏览器的进度
+  ipcMain.handle('youtube:get-progress', async (event, browserId) => {
+    try {
+      return { success: true, data: youtubeUploadService.getProgress(browserId) }
+    } catch (error) {
+      console.error('youtube:get-progress error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // 关闭连接
+  ipcMain.handle('youtube:close', async () => {
+    try {
+      await youtubeUploadService.close()
+      return { success: true }
+    } catch (error) {
+      console.error('youtube:close error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // ===== 上传日志相关 =====
+
+  ipcMain.handle('upload-log:create', async (event, logData) => {
+    try {
+      const id = dbService.createUploadLog(logData)
+      return { success: true, id }
+    } catch (error) {
+      console.error('upload-log:create error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('upload-log:update', async (event, id, updates) => {
+    try {
+      dbService.updateUploadLog(id, updates)
+      return { success: true }
+    } catch (error) {
+      console.error('upload-log:update error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('upload-log:list', async (event, options) => {
+    try {
+      return dbService.getUploadLogs(options)
+    } catch (error) {
+      console.error('upload-log:list error:', error)
+      return []
+    }
+  })
+
+  ipcMain.handle('upload-log:get', async (event, id) => {
+    try {
+      return dbService.getUploadLogById(id)
+    } catch (error) {
+      console.error('upload-log:get error:', error)
+      return null
+    }
+  })
+
+  ipcMain.handle('upload-log:delete', async (event, id) => {
+    try {
+      dbService.deleteUploadLog(id)
+      return { success: true }
+    } catch (error) {
+      console.error('upload-log:delete error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // ===== 用户缓存相关（从 Supabase 同步） =====
+
+  ipcMain.handle('users:sync', async () => {
+    try {
+      // 从 Supabase 获取用户列表
+      const users = await supabaseService.getUsers()
+      // 同步到本地缓存
+      dbService.syncCachedUsers(users)
+      return { success: true, count: users.length }
+    } catch (error) {
+      console.error('users:sync error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('users:get-cached', async () => {
+    try {
+      return dbService.getCachedUsers()
+    } catch (error) {
+      console.error('users:get-cached error:', error)
+      return []
+    }
+  })
+
+  ipcMain.handle('users:get-by-name', async (event, name) => {
+    try {
+      return dbService.getCachedUserByName(name)
+    } catch (error) {
+      console.error('users:get-by-name error:', error)
+      return null
+    }
+  })
+
+  ipcMain.handle('users:get-last-sync', async () => {
+    try {
+      return dbService.getLastUserSyncTime()
+    } catch (error) {
+      console.error('users:get-last-sync error:', error)
+      return null
     }
   })
 

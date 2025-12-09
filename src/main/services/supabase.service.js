@@ -406,7 +406,8 @@ class SupabaseService {
         video_language: aiResponse.videoLanguage,
         search_keywords: toArray(aiResponse.searchKeywords), // 确保是数组格式
         video_highlights: aiResponse.videoHighlights,
-        video_type: aiResponse.videoType
+        video_type: aiResponse.videoType,
+        script_value_add: aiResponse.scriptValueAdd // 文案增值分析
       }
     } else {
       // 如果是字符串，尝试解析
@@ -421,7 +422,8 @@ class SupabaseService {
           video_language: parsed.videoLanguage,
           search_keywords: toArray(parsed.searchKeywords), // 确保是数组格式
           video_highlights: parsed.videoHighlights,
-          video_type: parsed.videoType
+          video_type: parsed.videoType,
+          script_value_add: parsed.scriptValueAdd // 文案增值分析
         }
       } catch (e) {
         // 解析失败，存到 script_text 作为备份
@@ -505,10 +507,32 @@ class SupabaseService {
       'thumbnail', 'url', 'view_count', 'like_count', 'comment_count',
       'group_name', 'tags', 'generation_status', 'script_generated_at',
       'script_text', 'script_generation_error', 'created_at', 'updated_at',
-      // 新增字段
+      // AI 分析字段
       'video_description', 'original_script', 'chinese_script',
-      'video_language', 'search_keywords', 'video_highlights', 'video_type'
+      'video_language', 'search_keywords', 'video_highlights', 'video_type',
+      'script_value_add' // 文案增值分析
     ]
+  }
+
+  /**
+   * 获取用户列表（从users表）
+   * 用于同步到本地缓存
+   */
+  async getUsers() {
+    if (!this.client) {
+      throw new Error('未初始化 Supabase 客户端')
+    }
+
+    const { data, error } = await this.client
+      .from('users')
+      .select('id, name, phone, role, status')
+      .order('name', { ascending: true })
+
+    if (error) {
+      throw new Error(error.message)
+    }
+
+    return data || []
   }
 
   /**

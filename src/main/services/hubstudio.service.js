@@ -17,12 +17,15 @@ class HubStudioService {
   /**
    * 设置 HubStudio API 凭证
    * @param {string} appId - App ID
-   * @param {string} appSecret - App Secret
+   * @param {string} appSecret - App Secret（空字符串表示不修改已保存的密钥）
    * @param {string} groupCode - 团队代码
    */
   setCredentials(appId, appSecret, groupCode) {
     this.appId = appId
-    this.appSecret = appSecret
+    // 只有当传入非空密钥时才更新
+    if (appSecret) {
+      this.appSecret = appSecret
+    }
     this.groupCode = groupCode
     console.log('HubStudio credentials set, appId:', appId ? appId.substring(0, 8) + '...' : 'empty')
   }
@@ -114,17 +117,92 @@ class HubStudioService {
    */
   async getProfiles() {
     try {
+      console.log('========== HubStudio getProfiles START ==========')
       // HubStudio 客户端已登录时，不需要传递认证参数
-      const response = await this.client.post(`${this.apiUrl}/api/v1/env/list`, {
-        page: 1,
-        page_size: 100
-      })
+      // HubStudio API 有分页限制（每页最多返回10条），需要获取所有页的数据
+      // 注意：使用 Set 来去重，因为 API 可能返回重复数据
+      const profileMap = new Map()  // 使用 Map 按 containerCode 去重
+      let page = 1
+      const pageSize = 100  // 请求100条，但API可能只返回10条
+      let total = 0
+      const maxPages = 20  // 最多请求20页，防止死循环
+      let lastPageFirstCode = null  // 记录上一页第一条数据的 containerCode，用于检测重复
 
-      if (response.data.code === 0) {
-        console.log(`Retrieved ${response.data.data?.list?.length || 0} HubStudio environments`)
-        return response.data
-      } else {
-        throw new Error(response.data.msg || '获取环境列表失败')
+      while (page <= maxPages) {
+        console.log(`[HubStudio] >>> Fetching page ${page}...`)
+        const response = await this.client.post(`${this.apiUrl}/api/v1/env/list`, {
+          current: page,
+          size: pageSize
+        })
+
+        if (response.data.code === 0) {
+          const list = response.data.data?.list || []
+          total = response.data.data?.total || 0
+
+          console.log(`[HubStudio] Page ${page}: received ${list.length} items, total=${total}`)
+
+          if (list.length === 0) {
+            console.log('[HubStudio] Empty page received, stopping')
+            break
+          }
+
+          // 检测是否返回重复数据（API 忽略 page 参数的情况）
+          const firstCode = list[0]?.containerCode
+          if (firstCode && firstCode === lastPageFirstCode) {
+            console.log('[HubStudio] Detected duplicate page data, API does not support pagination properly')
+            break
+          }
+          lastPageFirstCode = firstCode
+
+          // 添加到 Map 中去重
+          let newCount = 0
+          for (const item of list) {
+            if (item.containerCode && !profileMap.has(item.containerCode)) {
+              profileMap.set(item.containerCode, item)
+              newCount++
+            }
+          }
+          console.log(`[HubStudio] Added ${newCount} new environments (unique total: ${profileMap.size})`)
+
+          // 如果已经获取了所有数据，退出循环
+          if (profileMap.size >= total && total > 0) {
+            console.log(`[HubStudio] All ${profileMap.size}/${total} environments retrieved`)
+            break
+          }
+
+          // 如果这一页没有新数据，说明 API 不支持正确的分页
+          if (newCount === 0) {
+            console.log('[HubStudio] No new data in this page, stopping pagination')
+            break
+          }
+
+          page++
+        } else {
+          console.error(`[HubStudio] API error: ${response.data.msg}`)
+          throw new Error(response.data.msg || '获取环境列表失败')
+        }
+      }
+
+      const allProfiles = Array.from(profileMap.values())
+      console.log(`========== HubStudio getProfiles END: ${allProfiles.length} unique profiles ==========`)
+
+      // 打印所有环境的所有可能 ID 字段以便调试
+      console.log('All HubStudio environments IDs:', allProfiles.map(p => ({
+        containerCode: p.containerCode,
+        id: p.id,
+        envId: p.envId,
+        profileId: p.profileId,
+        containerName: p.containerName,
+        name: p.name
+      })))
+
+      // 返回与之前相同的格式
+      return {
+        code: 0,
+        data: {
+          list: allProfiles,
+          total: allProfiles.length
+        }
       }
     } catch (error) {
       console.error('Failed to get HubStudio environments:', error.message)
@@ -710,6 +788,52 @@ class HubStudioService {
       }
     } catch (error) {
       console.error('Failed to check HubStudio browser status:', error.message)
+      return { success: false, error: error.message }
+    }
+  }
+  /**
+   * 批量检查浏览器状态
+   * @param {Array<string>} containerCodes - 环境ID列表
+   * @returns {Promise<Object>} 批量状态结果 { success: true, data: { code1: 'Active', code2: 'Inactive' } }
+   */
+  async getBatchBrowserStatus(containerCodes) {
+    if (!containerCodes || containerCodes.length === 0) {
+      return { success: true, data: {} }
+    }
+
+    try {
+      console.log(`Checking batch status for ${containerCodes.length} browsers...`)
+
+      // HubStudio API 支持批量查询
+      const response = await this.client.post(`${this.apiUrl}/api/v1/browser/all-browser-status`, {
+        containerCodes: containerCodes
+      })
+
+      if (response.data.code === 0) {
+        const containersList = this.extractContainersList(response.data)
+        const statusMap = {}
+
+        // 遍历请求的所有 code，默认为 Inactive
+        for (const code of containerCodes) {
+          statusMap[code] = 'Inactive'
+        }
+
+        // 更新返回的状态
+        for (const item of containersList) {
+          if (item.containerCode && item.status === 0) {
+            statusMap[item.containerCode] = 'Active'
+          }
+        }
+
+        return {
+          success: true,
+          data: statusMap
+        }
+      } else {
+        return { success: false, error: response.data.msg }
+      }
+    } catch (error) {
+      console.error('Failed to batch check HubStudio browser status:', error.message)
       return { success: false, error: error.message }
     }
   }

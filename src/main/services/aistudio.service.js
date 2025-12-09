@@ -36,7 +36,8 @@ class AIStudioService {
     "1. 爆点分析内容1",
     "2. 爆点分析内容2"
   ],
-  "videoType": "大类 - 子类（中文）"
+  "videoType": "大类 - 子类（中文）",
+  "scriptValueAdd": "文案增值分析内容"
 }
 \`\`\`
 
@@ -105,7 +106,20 @@ class AIStudioService {
           * **科普/解说类**：科普冷知识、历史悬疑、机械原理、自然地理、奇闻轶事、商业思维
           * **情感/剧情类**：感人故事、反转剧情、情侣日常、家庭伦理、正能量、POV视角
           * **娱乐/搞笑类**：搞笑段子、街头恶作剧、意外翻车(Fails)、迷因梗图、脱口秀
-          * **生活/兴趣类**：萌宠动物、儿童玩具、文具手帐、建筑设计、美食制作、沉浸式解压(ASMR)、DIY手工、收纳整理、好物推荐`
+          * **生活/兴趣类**：萌宠动物、儿童玩具、文具手帐、建筑设计、美食制作、沉浸式解压(ASMR)、DIY手工、收纳整理、好物推荐
+
+8.  **scriptValueAdd**:
+
+      * **目标**：分析解说文案如何为纯画面提供"增量信息"和"吸引力"。
+      * **语言**：必须用中文回复。
+      * **内容逻辑**（请在一段文本中包含以下三个层面的分析，使用换行符分隔）：
+          1. **纯画面信息**：如果静音观看，观众只能看到什么？（描述视觉表象）
+          2. **文案增量信息**：解说词提供了哪些画面里看不出来的信息？（如：背景故事、人物心理活动、未知的后果、专业知识科普等）
+          3. **增值效果分析**：这些额外信息是如何制造悬念、幽默感或紧迫感的？它是如何成功留住观众的？
+      * **示例**：
+        纯画面：一只猫蹲在鱼缸前看着鱼。
+        文案增量：解说提到这只猫已经绝食抗议了两天，这是它最后的倔强，并且鱼缸里的鱼其实是假的。
+        增值效果：文案赋予了静态画面强烈的故事性和反转喜感，让观众好奇猫发现真相后的反应，从而提高完播率。`
   }
 
   setDbService(dbService) {
@@ -805,6 +819,32 @@ class AIStudioService {
         const elapsed = Math.round((Date.now() - startTime) / 1000)
         let statusMsg = `⏱️ 等待AI回复... ${elapsed}s`
 
+        // 检查是否出现错误信息（内部错误或速率限制）
+        try {
+          const errorElement = await page.locator('.model-error, [class*="model-error"]').first()
+          if (await errorElement.isVisible({ timeout: 200 })) {
+            const errorText = await errorElement.textContent()
+            if (errorText) {
+              // 检测内部错误
+              if (errorText.includes('An internal error has occurred')) {
+                console.log(`[${workerId}] ❌ 检测到 AI Studio 内部错误: ${errorText}`)
+                throw new Error('AI Studio 内部错误: An internal error has occurred.')
+              }
+              // 检测速率限制错误
+              if (errorText.includes("You've reached your rate limit") || errorText.includes('rate limit')) {
+                console.log(`[${workerId}] ❌ 检测到 AI Studio 速率限制: ${errorText}`)
+                throw new Error('AI Studio 速率限制: 已达到今日使用上限，请明天再试。')
+              }
+            }
+          }
+        } catch (e) {
+          // 如果是我们主动抛出的错误，继续抛出
+          if (e.message && (e.message.includes('AI Studio 内部错误') || e.message.includes('AI Studio 速率限制'))) {
+            throw e
+          }
+          // 其他错误（如元素未找到）忽略
+        }
+
         // 检查 Stop 按钮状态（使用多个选择器）
         let stopVisible = false
         for (const stopSelector of stopButtonSelectors) {
@@ -1484,6 +1524,32 @@ class AIStudioService {
         while (!completionFound && (Date.now() - startTime) < timeout) {
           const elapsed = Math.round((Date.now() - startTime) / 1000)
           let statusMsg = `⏱️ 等待AI回复... ${elapsed}s`
+
+          // 检查是否出现错误信息（内部错误或速率限制）
+          try {
+            const errorElement = await page.locator('.model-error, [class*="model-error"]').first()
+            if (await errorElement.isVisible({ timeout: 200 })) {
+              const errorText = await errorElement.textContent()
+              if (errorText) {
+                // 检测内部错误
+                if (errorText.includes('An internal error has occurred')) {
+                  console.log(`[AIStudio] ❌ 检测到 AI Studio 内部错误: ${errorText}`)
+                  throw new Error('AI Studio 内部错误: An internal error has occurred.')
+                }
+                // 检测速率限制错误
+                if (errorText.includes("You've reached your rate limit") || errorText.includes('rate limit')) {
+                  console.log(`[AIStudio] ❌ 检测到 AI Studio 速率限制: ${errorText}`)
+                  throw new Error('AI Studio 速率限制: 已达到今日使用上限，请明天再试。')
+                }
+              }
+            }
+          } catch (e) {
+            // 如果是我们主动抛出的错误，继续抛出
+            if (e.message && (e.message.includes('AI Studio 内部错误') || e.message.includes('AI Studio 速率限制'))) {
+              throw e
+            }
+            // 其他错误（如元素未找到）忽略
+          }
 
           // 检查 Stop 按钮状态（使用多个选择器）
           let stopVisible = false

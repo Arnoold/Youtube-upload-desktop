@@ -27,9 +27,12 @@ import {
   ChromeOutlined,
   CloseOutlined,
   LinkOutlined,
-  CheckCircleOutlined,
-  CloseCircleOutlined,
-  UserOutlined
+  UserOutlined,
+  CloudDownloadOutlined,
+  HeartOutlined,
+  MessageOutlined,
+  ShareAltOutlined,
+  StarOutlined
 } from '@ant-design/icons'
 
 const { Title, Text, Paragraph } = Typography
@@ -39,41 +42,31 @@ const DouyinPage = () => {
     browserRunning: false,
     isCollecting: false,
     collectedCount: 0,
-    currentProfile: null
+    currentBrowserId: null
   })
-  const [chromeStatus, setChromeStatus] = useState({
-    running: false,
-    debugMode: false,
-    message: ''
-  })
-  const [profiles, setProfiles] = useState([])
-  const [selectedProfile, setSelectedProfile] = useState(null)
+  const [accounts, setAccounts] = useState([])
+  const [selectedAccount, setSelectedAccount] = useState(null)
   const [videos, setVideos] = useState([])
   const [loading, setLoading] = useState(false)
-  const [startingDebugMode, setStartingDebugMode] = useState(false)
+  const [connectingBrowser, setConnectingBrowser] = useState(false)
   const [collectCount, setCollectCount] = useState(10)
   const [progress, setProgress] = useState({ current: 0, total: 0 })
   const [currentVideo, setCurrentVideo] = useState(null)
+  const [pageData, setPageData] = useState([])
+  const [fetchingPageData, setFetchingPageData] = useState(false)
 
-  // 检查 Chrome 状态和获取配置文件
-  const checkChromeStatus = async () => {
+  // 加载采集账号列表
+  const loadAccounts = async () => {
     try {
-      const [chromeResult, profilesList, status] = await Promise.all([
-        window.electron.douyin.checkChrome(),
-        window.electron.douyin.getProfiles(),
-        window.electron.douyin.getStatus()
-      ])
-
-      setChromeStatus(chromeResult)
-      setProfiles(profilesList)
-      setBrowserStatus(status)
-
-      // 默认选择第一个配置文件
-      if (profilesList.length > 0 && !selectedProfile) {
-        setSelectedProfile(profilesList[0].id)
+      const data = await window.electron.collectAccount.list('douyin')
+      setAccounts(data)
+      // 默认选择第一个账号
+      if (data.length > 0 && !selectedAccount) {
+        setSelectedAccount(data[0].bit_browser_id)
       }
     } catch (error) {
-      console.error('Failed to check Chrome status:', error)
+      console.error('Failed to load accounts:', error)
+      message.error('加载采集账号失败')
     }
   }
 
@@ -107,76 +100,40 @@ const DouyinPage = () => {
       }
     })
 
-    // 初始化检查
-    checkChromeStatus()
+    // 初始化
+    loadAccounts()
     fetchStatus()
-
-    // 定时刷新 Chrome 状态
-    const interval = setInterval(checkChromeStatus, 5000)
 
     return () => {
       window.electron.douyin.removeListener('douyin:progress')
-      clearInterval(interval)
     }
   }, [])
 
-  // 启动 Chrome 调试模式
-  const handleStartDebugMode = async () => {
-    if (!selectedProfile) {
-      message.warning('请先选择一个 Chrome 配置文件')
+  // 连接到比特浏览器
+  const handleLaunch = async () => {
+    if (!selectedAccount) {
+      message.warning('请先选择一个采集账号')
       return
     }
 
-    console.log('[DouyinPage] Starting debug mode with profile:', selectedProfile)
-    setStartingDebugMode(true)
+    console.log('[DouyinPage] Launching BitBrowser:', selectedAccount)
+    setConnectingBrowser(true)
 
     try {
-      const result = await window.electron.douyin.startDebugMode(selectedProfile)
-      console.log('[DouyinPage] Start debug mode result:', result)
-
-      if (result.success) {
-        message.success(result.message)
-        await checkChromeStatus()
-      } else {
-        if (result.needCloseChrome) {
-          message.warning(result.error)
-        } else {
-          message.error(result.error || '启动失败')
-        }
-      }
-    } catch (error) {
-      console.error('[DouyinPage] Start debug mode error:', error)
-      message.error('启动调试模式失败: ' + error.message)
-    } finally {
-      setStartingDebugMode(false)
-    }
-  }
-
-  // 连接到浏览器
-  const handleLaunch = async () => {
-    console.log('[DouyinPage] handleLaunch called')
-    setLoading(true)
-
-    try {
-      console.log('[DouyinPage] Calling window.electron.douyin.launch...')
-      const result = await window.electron.douyin.launch(selectedProfile)
+      const result = await window.electron.douyin.launch(selectedAccount)
       console.log('[DouyinPage] Launch result:', result)
 
       if (result.success) {
         message.success(result.message)
         await fetchStatus()
       } else {
-        if (result.needStartDebugMode) {
-          message.warning(result.error)
-        } else {
-          message.error(result.error || '连接失败')
-        }
+        message.error(result.error || '启动浏览器失败')
       }
     } catch (error) {
       console.error('[DouyinPage] Launch error:', error)
-      message.error('连接浏览器失败: ' + error.message)
+      message.error('启动浏览器失败: ' + error.message)
     } finally {
-      setLoading(false)
+      setConnectingBrowser(false)
     }
   }
 
@@ -274,10 +231,8 @@ const DouyinPage = () => {
         browserRunning: false,
         isCollecting: false,
         collectedCount: 0,
-        currentProfile: null
+        currentBrowserId: null
       })
-      // 刷新 Chrome 状态
-      await checkChromeStatus()
     } catch (error) {
       message.error('断开连接失败: ' + error.message)
     }
@@ -311,10 +266,37 @@ const DouyinPage = () => {
     }
   }
 
-  // 刷新配置文件列表
-  const handleRefreshProfiles = async () => {
-    await checkChromeStatus()
-    message.success('已刷新配置文件列表')
+  // 刷新账号列表
+  const handleRefreshAccounts = async () => {
+    await loadAccounts()
+    message.success('已刷新账号列表')
+  }
+
+  // 获取页面数据
+  const handleGetPageData = async () => {
+    setFetchingPageData(true)
+    try {
+      const result = await window.electron.douyin.getPageData()
+      if (result.success) {
+        setPageData(result.videos)
+        message.success(`成功获取 ${result.count} 条视频数据`)
+      } else {
+        message.error(result.error || '获取数据失败')
+      }
+    } catch (error) {
+      message.error('获取页面数据失败: ' + error.message)
+    } finally {
+      setFetchingPageData(false)
+    }
+  }
+
+  // 格式化数字
+  const formatNumber = (num) => {
+    if (!num) return '0'
+    if (num >= 10000) {
+      return (num / 10000).toFixed(1) + 'w'
+    }
+    return num.toString()
   }
 
   // 表格列定义
@@ -409,124 +391,63 @@ const DouyinPage = () => {
     <div>
       <Title level={4}>抖音视频采集</Title>
 
-      {/* Chrome 状态 */}
+      {/* 连接状态 */}
       <Card size="small" style={{ marginBottom: 16 }}>
         <Space split={<Divider type="vertical" />}>
           <span>
-            Chrome 调试模式：
-            {chromeStatus.debugMode ? (
-              <Badge status="success" text={<Text type="success">已就绪</Text>} />
-            ) : chromeStatus.running ? (
-              <Badge status="warning" text={<Text type="warning">运行中（非调试模式）</Text>} />
-            ) : (
-              <Badge status="default" text="未启动" />
-            )}
-          </span>
-          <span>
-            连接状态：
+            浏览器状态：
             {browserStatus.browserRunning ? (
               <Badge status="success" text={<Text type="success">已连接</Text>} />
             ) : (
               <Badge status="default" text="未连接" />
             )}
           </span>
-          <Button size="small" icon={<ReloadOutlined />} onClick={checkChromeStatus}>
+          {browserStatus.browserRunning && browserStatus.currentBrowserId && (
+            <span>
+              <Text type="secondary">浏览器ID: {browserStatus.currentBrowserId.slice(0, 8)}...</Text>
+            </span>
+          )}
+          <Button size="small" icon={<ReloadOutlined />} onClick={fetchStatus}>
             刷新状态
           </Button>
         </Space>
       </Card>
 
-      {/* 操作指引 */}
-      {!browserStatus.browserRunning && (
-        <Alert
-          message="使用说明"
-          description={
-            <div>
-              <p style={{ marginBottom: 8 }}>
-                <strong>步骤 1：</strong>选择您已登录抖音的 Chrome 配置文件
-              </p>
-              <p style={{ marginBottom: 8 }}>
-                <strong>步骤 2：</strong>点击「启动调试模式」启动 Chrome（会自动打开您选择的配置文件，保留登录状态）
-              </p>
-              <p style={{ marginBottom: 8 }}>
-                <strong>步骤 3：</strong>Chrome 启动后，点击「连接浏览器」建立控制连接
-              </p>
-              <p style={{ marginBottom: 0 }}>
-                <strong>注意：</strong>如果您的 Chrome 正在运行，请先完全关闭它（包括后台进程），然后再启动调试模式
-              </p>
-            </div>
-          }
-          type="info"
-          showIcon
-          style={{ marginBottom: 16 }}
-        />
-      )}
-
-      {chromeStatus.running && !chromeStatus.debugMode && (
-        <Alert
-          message="Chrome 正在运行（非调试模式）"
-          description={
-            <div>
-              <p style={{ marginBottom: 8 }}>
-                检测到 Chrome 正在以普通模式运行。要使用抖音采集功能，请先关闭所有 Chrome 窗口和后台进程，然后点击「启动调试模式」重新启动。
-              </p>
-              <Button
-                danger
-                size="small"
-                onClick={async () => {
-                  const result = await window.electron.douyin.killChrome()
-                  if (result.success) {
-                    message.success('已关闭 Chrome 进程，请稍后刷新状态')
-                    setTimeout(() => checkChromeStatus(), 1500)
-                  }
-                }}
-              >
-                强制关闭所有 Chrome 进程
-              </Button>
-            </div>
-          }
-          type="warning"
-          showIcon
-          style={{ marginBottom: 16 }}
-        />
-      )}
-
-      {/* 配置文件选择 */}
-      <Card title="选择 Chrome 配置文件" style={{ marginBottom: 16 }}>
+      {/* 账号选择 */}
+      <Card title="选择采集账号" style={{ marginBottom: 16 }}>
         <Space direction="vertical" style={{ width: '100%' }}>
           <Space>
             <Select
               style={{ width: 300 }}
-              placeholder="选择 Chrome 配置文件"
-              value={selectedProfile}
-              onChange={setSelectedProfile}
+              placeholder="选择采集账号"
+              value={selectedAccount}
+              onChange={setSelectedAccount}
               disabled={browserStatus.browserRunning}
-              options={profiles.map(p => ({
-                value: p.id,
+              options={accounts.map(a => ({
+                value: a.bit_browser_id,
                 label: (
                   <Space>
                     <UserOutlined />
-                    {p.name}
-                    {p.gaiaName && <Text type="secondary">({p.gaiaName})</Text>}
-                    {p.isDefault && <Tag color="blue" size="small">默认</Tag>}
+                    {a.name}
+                    {a.remark && <Text type="secondary">({a.remark})</Text>}
                   </Space>
                 )
               }))}
             />
             <Button
               icon={<ReloadOutlined />}
-              onClick={handleRefreshProfiles}
+              onClick={handleRefreshAccounts}
               disabled={browserStatus.browserRunning}
             >
               刷新
             </Button>
           </Space>
 
-          {profiles.length === 0 && (
+          {accounts.length === 0 && (
             <Alert
-              message="未找到 Chrome 配置文件"
-              description="请确保已安装 Chrome 浏览器并至少使用过一次。"
-              type="info"
+              message="未找到采集账号"
+              description="请先在「采集账号管理」页面添加比特浏览器账号。"
+              type="warning"
               showIcon
             />
           )}
@@ -537,29 +458,15 @@ const DouyinPage = () => {
       <Card title="控制面板" style={{ marginBottom: 16 }}>
         <Space wrap>
           {!browserStatus.browserRunning ? (
-            <>
-              {/* 步骤1：启动调试模式 */}
-              <Button
-                type={chromeStatus.debugMode ? 'default' : 'primary'}
-                icon={<ChromeOutlined />}
-                onClick={handleStartDebugMode}
-                loading={startingDebugMode}
-                disabled={!selectedProfile || chromeStatus.debugMode || browserStatus.browserRunning}
-              >
-                {chromeStatus.debugMode ? '调试模式已启动' : '启动调试模式'}
-              </Button>
-
-              {/* 步骤2：连接浏览器 */}
-              <Button
-                type={chromeStatus.debugMode ? 'primary' : 'default'}
-                icon={<PlayCircleOutlined />}
-                onClick={handleLaunch}
-                loading={loading}
-                disabled={!chromeStatus.debugMode}
-              >
-                连接浏览器
-              </Button>
-            </>
+            <Button
+              type="primary"
+              icon={<ChromeOutlined />}
+              onClick={handleLaunch}
+              loading={connectingBrowser}
+              disabled={!selectedAccount}
+            >
+              启动浏览器
+            </Button>
           ) : (
             <>
               <Button
@@ -581,6 +488,14 @@ const DouyinPage = () => {
 
               <Button icon={<ReloadOutlined />} onClick={handleGetCurrent}>
                 获取当前视频
+              </Button>
+
+              <Button
+                icon={<CloudDownloadOutlined />}
+                onClick={handleGetPageData}
+                loading={fetchingPageData}
+              >
+                抓取页面数据
               </Button>
 
               <Space.Compact>
@@ -693,6 +608,100 @@ const DouyinPage = () => {
           }}
         />
       </Card>
+
+      {/* 页面数据展示 */}
+      {pageData.length > 0 && (
+        <Card
+          title={`页面数据 (${pageData.length} 条)`}
+          style={{ marginTop: 16 }}
+          extra={
+            <Button
+              icon={<DeleteOutlined />}
+              size="small"
+              onClick={() => setPageData([])}
+            >
+              清空
+            </Button>
+          }
+        >
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16 }}>
+            {pageData.map((item, index) => (
+              <Card
+                key={item.awemeId || index}
+                size="small"
+                style={{ width: 320 }}
+                cover={
+                  item.video?.cover ? (
+                    <img
+                      alt="cover"
+                      src={item.video.cover}
+                      style={{ height: 180, objectFit: 'cover' }}
+                    />
+                  ) : null
+                }
+              >
+                <Card.Meta
+                  avatar={
+                    item.author?.avatarThumb ? (
+                      <img
+                        src={item.author.avatarThumb}
+                        alt="avatar"
+                        style={{ width: 40, height: 40, borderRadius: '50%' }}
+                      />
+                    ) : (
+                      <UserOutlined style={{ fontSize: 24 }} />
+                    )
+                  }
+                  title={
+                    <Tooltip title={item.author?.nickname}>
+                      <Text ellipsis style={{ maxWidth: 200 }}>
+                        {item.author?.nickname || '未知作者'}
+                      </Text>
+                    </Tooltip>
+                  }
+                  description={
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      粉丝: {formatNumber(item.author?.followerCount)}
+                    </Text>
+                  }
+                />
+
+                <Tooltip title={item.desc}>
+                  <Paragraph
+                    ellipsis={{ rows: 2 }}
+                    style={{ marginTop: 12, marginBottom: 8, minHeight: 44 }}
+                  >
+                    {item.desc || '无描述'}
+                  </Paragraph>
+                </Tooltip>
+
+                <div style={{ display: 'flex', justifyContent: 'space-between', color: '#999', fontSize: 12 }}>
+                  <span><HeartOutlined /> {formatNumber(item.statistics?.diggCount)}</span>
+                  <span><MessageOutlined /> {formatNumber(item.statistics?.commentCount)}</span>
+                  <span><StarOutlined /> {formatNumber(item.statistics?.collectCount)}</span>
+                  <span><ShareAltOutlined /> {formatNumber(item.statistics?.shareCount)}</span>
+                </div>
+
+                {item.textExtra?.length > 0 && (
+                  <div style={{ marginTop: 8 }}>
+                    {item.textExtra.slice(0, 3).map((tag, i) => (
+                      <Tag key={i} color="blue" style={{ fontSize: 10 }}>
+                        #{tag.hashtagName}
+                      </Tag>
+                    ))}
+                  </div>
+                )}
+
+                <div style={{ marginTop: 8, fontSize: 11, color: '#999' }}>
+                  <Text copyable={{ text: item.awemeId }} style={{ fontSize: 11 }}>
+                    ID: {item.awemeId?.slice(0, 12)}...
+                  </Text>
+                </div>
+              </Card>
+            ))}
+          </div>
+        </Card>
+      )}
     </div>
   )
 }
