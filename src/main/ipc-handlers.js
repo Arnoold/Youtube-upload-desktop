@@ -752,11 +752,12 @@ function setupIPC(mainWindow, services) {
           console.log('[VERIFY_IPC] Pasting link...')
           await clipboardLock.writeAndPaste(page, targetVideoLink, 'ipc-paste-video-url')
 
-          // 3.2.1 验证视频附件是否出现
-          console.log('[VERIFY_IPC] Waiting for video attachment (ms-youtube-chunk)...')
+          // 3.2.1 验证视频附件是否出现（Google 更新后的新选择器）
+          // 新结构：ms-prompt-media > ms-prompt-video
+          console.log('[VERIFY_IPC] Waiting for video attachment...')
           try {
             // 等待 YouTube 视频组件出现，这表示粘贴成功了
-            await page.waitForSelector('ms-youtube-chunk', {
+            await page.waitForSelector('ms-prompt-media, ms-prompt-video, ms-youtube-chunk', {
               state: 'visible',
               timeout: 10000
             })
@@ -770,20 +771,21 @@ function setupIPC(mainWindow, services) {
             }
           }
 
-          // 3.2.2 等待视频处理完成 (齿轮图标)
-          console.log('[VERIFY_IPC] Waiting for video processing (settings_video_camera icon)...')
+          // 3.2.2 等待视频处理完成（Google 更新后的新选择器）
+          // 新结构：处理完成后会显示 token 数量，或者设置按钮变为可点击状态
+          console.log('[VERIFY_IPC] Waiting for video processing...')
           try {
-            // 等待 YouTube 视频处理完成，标志是出现 settings_video_camera 图标
-            await page.waitForSelector('mat-icon:has-text("settings_video_camera")', {
+            // 等待 token 数量出现或设置按钮可用（表示视频已处理完成）
+            await page.waitForSelector('ms-token-status span[data-test-id="token-count"], ms-prompt-media button[aria-label="Edit video options"]:not([disabled]), mat-icon:has-text("settings_video_camera"), span.material-symbols-outlined:has-text("settings")', {
               state: 'visible',
               timeout: 60000
             })
-            console.log('[VERIFY_IPC] Video processing complete (settings_video_camera icon found)')
+            console.log('[VERIFY_IPC] Video processing complete (token count or settings icon found)')
           } catch (e) {
             console.error('[VERIFY_IPC] Timeout waiting for video processing.')
             return {
               success: false,
-              message: '视频处理超时：未检测到处理完成图标 (settings_video_camera)。',
+              message: '视频处理超时：未检测到处理完成标志（token数量或设置图标）。',
               browserId: browserResult.browserId
             }
           }

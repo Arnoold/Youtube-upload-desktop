@@ -603,22 +603,27 @@ class AIStudioService {
       // 使用剪贴板锁保护粘贴操作，避免多浏览器并行时冲突
       await clipboardLock.writeAndPaste(page, videoUrl, `worker-paste-video-url`)
 
-      // 验证视频附件
+      // 验证视频附件（Google 更新后的新选择器）
+      // 新结构：ms-prompt-media > ms-prompt-video
       try {
-        await page.waitForSelector('ms-youtube-chunk', {
+        await page.waitForSelector('ms-prompt-media, ms-prompt-video, ms-youtube-chunk', {
           state: 'visible',
           timeout: 20000
         })
+        console.log('[Worker] Video attachment detected.')
       } catch (e) {
         throw new Error('粘贴视频链接失败：未检测到视频附件')
       }
 
-      // 等待视频处理完成
+      // 等待视频处理完成（Google 更新后的新选择器）
+      // 新结构：处理完成后会显示 token 数量，或者设置按钮变为可点击状态
       try {
-        await page.waitForSelector('mat-icon:has-text("settings_video_camera")', {
+        // 方法1：等待 token 数量出现（表示视频已处理完成）
+        await page.waitForSelector('ms-token-status span[data-test-id="token-count"], ms-prompt-media button[aria-label="Edit video options"]:not([disabled]), mat-icon:has-text("settings_video_camera"), span.material-symbols-outlined:has-text("settings")', {
           state: 'visible',
           timeout: 60000
         })
+        console.log('[Worker] Video processing complete.')
       } catch (e) {
         throw new Error('视频处理超时：未检测到处理完成图标')
       }
@@ -1286,10 +1291,11 @@ class AIStudioService {
       console.log('[AIStudio] Pasting link...')
       await clipboardLock.writeAndPaste(page, videoUrl, 'paste-video-url')
 
-      // 验证视频附件
+      // 验证视频附件（Google 更新后的新选择器）
+      // 新结构：ms-prompt-media > ms-prompt-video
       console.log('[AIStudio] Waiting for video attachment...')
       try {
-        await page.waitForSelector('ms-youtube-chunk', {
+        await page.waitForSelector('ms-prompt-media, ms-prompt-video, ms-youtube-chunk', {
           state: 'visible',
           timeout: 20000
         })
@@ -1298,15 +1304,16 @@ class AIStudioService {
         throw new Error('粘贴视频链接失败：未检测到视频附件')
       }
 
-      // 等待链接解析/预览生成
+      // 等待视频处理完成（Google 更新后的新选择器）
+      // 新结构：处理完成后会显示 token 数量，或者设置按钮变为可点击状态
       console.log('Waiting for video link processing...')
       try {
-        // 等待 YouTube 视频处理完成，标志是出现 settings_video_camera 图标
-        await page.waitForSelector('mat-icon:has-text("settings_video_camera")', {
+        // 等待 token 数量出现或设置按钮可用（表示视频已处理完成）
+        await page.waitForSelector('ms-token-status span[data-test-id="token-count"], ms-prompt-media button[aria-label="Edit video options"]:not([disabled]), mat-icon:has-text("settings_video_camera"), span.material-symbols-outlined:has-text("settings")', {
           state: 'visible',
           timeout: 60000
         })
-        console.log('Video link processed (settings_video_camera icon found)')
+        console.log('Video link processed (token count or settings icon found)')
       } catch (e) {
         throw new Error('视频处理超时：未检测到处理完成图标')
       }

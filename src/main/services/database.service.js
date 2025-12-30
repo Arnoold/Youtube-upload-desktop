@@ -145,9 +145,6 @@ class DatabaseService {
     // 迁移：为 commentary_tasks 表添加时间字段
     this.migrateCommentaryTasks()
 
-    // 迁移：为 upload_logs 表添加时区字段
-    this.migrateUploadLogs()
-
     // 创建采集账号表
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS collect_accounts (
@@ -200,6 +197,9 @@ class DatabaseService {
         synced_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `)
+
+    // 迁移：为 upload_logs 表添加时区字段（必须在表创建之后）
+    this.migrateUploadLogs()
 
     console.log('Database tables created/verified')
   }
