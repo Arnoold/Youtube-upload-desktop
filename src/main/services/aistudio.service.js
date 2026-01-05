@@ -20,6 +20,7 @@ class AIStudioService {
     this.activeWorkers = new Map() // workerId -> { browserProfileId, isProcessing, currentItem }
     this.taskQueue = [] // 待处理的任务项队列
     this.taskId = null // 当前任务ID
+    this.rateLimitedBrowsers = new Set() // 本次任务中已达到速率限制的浏览器 ID
     this.defaultPrompt = `请分析以上我提供的 YouTube 视频链接的内容，并严格按照以下 JSON 格式输出分析结果。不要输出 JSON 以外的任何开场白或结束语。
 
 \`\`\`json
@@ -128,6 +129,55 @@ class AIStudioService {
 
   setBitBrowserService(bitBrowserService) {
     this.bitBrowserService = bitBrowserService
+  }
+
+  /**
+   * 从 YouTube URL 中提取视频 ID
+   * @param {string} url - YouTube 视频链接
+   * @returns {string|null} - 视频 ID 或 null
+   */
+  extractVideoId(url) {
+    if (!url) return null
+    // 支持多种 YouTube URL 格式
+    // https://www.youtube.com/watch?v=VIDEO_ID
+    // https://youtu.be/VIDEO_ID
+    // https://www.youtube.com/embed/VIDEO_ID
+    // https://www.youtube.com/shorts/VIDEO_ID
+    const patterns = [
+      /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/shorts\/)([a-zA-Z0-9_-]{11})/,
+      /^([a-zA-Z0-9_-]{11})$/ // 纯视频 ID
+    ]
+    for (const pattern of patterns) {
+      const match = url.match(pattern)
+      if (match) return match[1]
+    }
+    return null
+  }
+
+  /**
+   * 检测 YouTube 视频是否有效（未被删除）
+   * 通过请求视频缩略图来判断，被删除的视频缩略图会返回 404
+   * @param {string} videoUrl - YouTube 视频链接
+   * @returns {Promise<boolean>} - true = 视频有效, false = 视频已被删除
+   */
+  async checkVideoExists(videoUrl) {
+    const videoId = this.extractVideoId(videoUrl)
+    if (!videoId) {
+      console.log('[AIStudio] 无法从 URL 提取视频 ID:', videoUrl)
+      return true // 无法判断，默认认为有效
+    }
+
+    const thumbnailUrl = `https://ytimg.googleusercontent.com/vi/${videoId}/hqdefault.jpg`
+
+    try {
+      const response = await fetch(thumbnailUrl, { method: 'HEAD' })
+      const isValid = response.ok
+      console.log(`[AIStudio] 视频 ${videoId} 有效性检测: ${isValid ? '有效' : '已删除'} (HTTP ${response.status})`)
+      return isValid
+    } catch (error) {
+      console.error('[AIStudio] 检测视频有效性时出错:', error.message)
+      return true // 网络错误时默认认为有效，继续尝试
+    }
   }
 
   setHubStudioService(hubStudioService) {
@@ -249,6 +299,16 @@ class AIStudioService {
           this.dbService.updateCommentaryTaskItemStatus(item.id, 'completed', responseToSave)
           processedCount++
 
+          // 记录成功次数
+          try {
+            const account = this.dbService.getAIStudioAccountByBrowserId(browserProfileId)
+            if (account) {
+              this.dbService.recordAIStudioSuccess(account.id)
+            }
+          } catch (e) {
+            console.error('[AIStudio] Failed to record success:', e)
+          }
+
           // 休息一下
           if (i < pendingItems.length - 1 && !this.shouldStop) {
             await new Promise(resolve => setTimeout(resolve, 3000))
@@ -256,8 +316,30 @@ class AIStudioService {
 
         } catch (error) {
           console.error(`Failed to process item ${item.id}:`, error)
-          // 更新失败状态
-          this.dbService.updateCommentaryTaskItemStatus(item.id, 'failed', null, error.message)
+
+          // 检测是否是速率限制错误
+          const isRateLimitError = error.message && error.message.includes('速率限制')
+
+          if (isRateLimitError) {
+            // 速率限制：停止任务，保持当前项为 pending 状态
+            console.log(`[AIStudio] Hit rate limit, stopping task`)
+            this.dbService.updateCommentaryTaskItemStatus(item.id, 'pending', null, null) // 重置为待处理
+
+            progressCallback({
+              type: 'task',
+              taskId: taskId,
+              status: 'rate_limited',
+              message: '已达今日使用上限，任务暂停'
+            })
+
+            // 设置停止标志并跳出循环
+            this.shouldStop = true
+            break
+          }
+
+          // 其他错误：正常处理
+          const status = error.isVideoDeleted ? 'video_deleted' : 'failed'
+          this.dbService.updateCommentaryTaskItemStatus(item.id, status, null, error.message)
           processedCount++ // 即使失败也算处理过
         }
       }
@@ -311,6 +393,7 @@ class AIStudioService {
     this.isProcessing = true
     this.taskId = taskId
     this.currentTask = { type: 'parallel', id: taskId }
+    this.rateLimitedBrowsers.clear() // 清空速率限制记录
 
     try {
       // 1. 获取任务项
@@ -377,6 +460,7 @@ class AIStudioService {
       this.shouldStop = false
       this.taskQueue = []
       this.activeWorkers.clear()
+      this.rateLimitedBrowsers.clear() // 清空速率限制记录，不影响下次使用
     }
   }
 
@@ -438,6 +522,16 @@ class AIStudioService {
           this.dbService.updateCommentaryTaskItemStatus(item.id, 'completed', responseToSave)
           addCompleted(1)
 
+          // 记录成功次数
+          try {
+            const account = this.dbService.getAIStudioAccountByBrowserId(browserProfileId)
+            if (account) {
+              this.dbService.recordAIStudioSuccess(account.id)
+            }
+          } catch (e) {
+            console.error(`[AIStudio] Worker ${workerId} failed to record success:`, e)
+          }
+
           progressCallback({
             type: 'single',
             taskId: taskId,
@@ -457,7 +551,48 @@ class AIStudioService {
 
         } catch (error) {
           console.error(`[AIStudio] Worker ${workerId} failed to process item ${item.id}:`, error)
-          this.dbService.updateCommentaryTaskItemStatus(item.id, 'failed', null, error.message)
+
+          // 检测是否是速率限制错误
+          const isRateLimitError = error.message && error.message.includes('速率限制')
+
+          if (isRateLimitError) {
+            // 速率限制：将当前项放回队列头部，供其他 worker 处理
+            console.log(`[AIStudio] Worker ${workerId} hit rate limit, putting item back to queue and stopping`)
+            this.dbService.updateCommentaryTaskItemStatus(item.id, 'pending', null, null) // 重置为待处理
+            this.taskQueue.unshift(item) // 放回队列头部
+
+            // 标记此浏览器已达限制
+            this.rateLimitedBrowsers.add(browserProfileId)
+
+            progressCallback({
+              type: 'worker',
+              taskId: taskId,
+              workerId: workerId,
+              browserProfileId: browserProfileId,
+              status: 'rate_limited',
+              message: `[${workerId}] 已达今日使用上限，停止使用此浏览器`
+            })
+
+            // 检查是否所有浏览器都已达限制
+            if (this.rateLimitedBrowsers.size >= this.activeWorkers.size) {
+              console.log(`[AIStudio] All browsers hit rate limit, stopping task`)
+              this.shouldStop = true
+              progressCallback({
+                type: 'task',
+                taskId: taskId,
+                status: 'rate_limited',
+                message: '所有浏览器账号已达今日使用上限，任务暂停'
+              })
+            }
+
+            // 结束此 worker
+            break
+          }
+
+          // 其他错误：正常处理
+          const status = error.isVideoDeleted ? 'video_deleted' : 'failed'
+          const statusText = error.isVideoDeleted ? '视频已删除' : '失败'
+          this.dbService.updateCommentaryTaskItemStatus(item.id, status, null, error.message)
           addCompleted(1)
 
           progressCallback({
@@ -465,15 +600,15 @@ class AIStudioService {
             taskId: taskId,
             workerId: workerId,
             videoId: video.id,
-            status: 'error',
+            status: error.isVideoDeleted ? 'video_deleted' : 'error',
             current: getCompleted(),
             total: total,
             error: error.message,
-            message: `[${workerId}] 失败: ${video.title} - ${error.message}`
+            message: `[${workerId}] ${statusText}: ${video.title} - ${error.message}`
           })
 
-          // 失败后短暂等待再继续
-          await new Promise(resolve => setTimeout(resolve, 3000))
+          // 失败后短暂等待再继续（视频已删除则不需要等太久）
+          await new Promise(resolve => setTimeout(resolve, error.isVideoDeleted ? 1000 : 3000))
         }
       }
     } finally {
@@ -598,6 +733,15 @@ class AIStudioService {
 
       if (!videoUrl) {
         throw new Error('视频链接为空')
+      }
+
+      // 在粘贴之前检测视频是否已被删除
+      const videoExists = await this.checkVideoExists(videoUrl)
+      if (!videoExists) {
+        // 视频已被删除，返回特殊状态
+        const error = new Error('视频已被删除')
+        error.isVideoDeleted = true
+        throw error
       }
 
       // 使用剪贴板锁保护粘贴操作，避免多浏览器并行时冲突
@@ -784,6 +928,17 @@ class AIStudioService {
 
       if (!sendSuccess) {
         console.log(`[${workerId}] ⚠ 发送按钮点击可能未成功，但继续等待响应...`)
+      }
+
+      // 记录发送次数（无论成功与否，只要执行到这里就算发送了）
+      try {
+        const account = this.dbService.getAIStudioAccountByBrowserId(browserProfileId)
+        if (account) {
+          this.dbService.recordAIStudioUsage(account.id)
+          console.log(`[${workerId}] 已记录发送次数`)
+        }
+      } catch (e) {
+        console.error(`[${workerId}] 记录发送次数失败:`, e)
       }
 
       // Step 8: 等待 AI 回复
@@ -1483,6 +1638,17 @@ class AIStudioService {
         console.log('[AIStudio] ⚠ 发送按钮点击可能未成功，但继续等待响应...')
       }
 
+      // 记录发送次数（无论成功与否，只要执行到这里就算发送了）
+      try {
+        const account = this.dbService.getAIStudioAccountByBrowserId(browserProfileId)
+        if (account) {
+          this.dbService.recordAIStudioUsage(account.id)
+          console.log('[AIStudio] 已记录发送次数')
+        }
+      } catch (e) {
+        console.error('[AIStudio] 记录发送次数失败:', e)
+      }
+
       // Step 8: 等待 AI 回复
       // 8.1 等待生成开始
       console.log('[AIStudio] Waiting for AI to start generating...')
@@ -2025,6 +2191,20 @@ class AIStudioService {
       isProcessing: this.isProcessing,
       currentTask: this.currentTask
     }
+  }
+
+  /**
+   * 强制重置状态（用于状态卡住的情况）
+   */
+  forceReset() {
+    console.log('[AIStudio] Force resetting state...')
+    this.isProcessing = false
+    this.currentTask = null
+    this.shouldStop = false
+    this.taskQueue = []
+    this.activeWorkers.clear()
+    console.log('[AIStudio] State reset complete')
+    return true
   }
 }
 

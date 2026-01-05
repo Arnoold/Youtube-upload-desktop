@@ -16,7 +16,9 @@ contextBridge.exposeInMainWorld('electron', {
     test: () => ipcRenderer.invoke('browser:test'),
     list: () => ipcRenderer.invoke('browser:list'),
     create: (config) => ipcRenderer.invoke('browser:create', config),
-    checkStatus: (browserId, browserType) => ipcRenderer.invoke('browser:check-status', browserId, browserType)
+    checkStatus: (browserId, browserType) => ipcRenderer.invoke('browser:check-status', browserId, browserType),
+    closeAllBitBrowser: () => ipcRenderer.invoke('browser:closeAllBitBrowser'),
+    closeAllHubStudio: () => ipcRenderer.invoke('browser:closeAllHubStudio')
   },
 
   // HubStudio 浏览器
@@ -113,6 +115,9 @@ contextBridge.exposeInMainWorld('electron', {
     stopTask: () => ipcRenderer.invoke('aistudio:stop-task'),
     getStatus: () => ipcRenderer.invoke('aistudio:status'),
     cancel: () => ipcRenderer.invoke('aistudio:cancel'),
+    forceReset: () => ipcRenderer.invoke('aistudio:force-reset'),
+    getUsageStats: () => ipcRenderer.invoke('aistudio:get-usage-stats'),
+    resetDailyCount: (accountId) => ipcRenderer.invoke('aistudio:reset-daily-count', accountId),
     openBrowser: (videoLink, browserId, prompt) => ipcRenderer.invoke('aistudio:open-browser', videoLink, browserId, prompt),
 
     // 监听处理进度
@@ -183,6 +188,7 @@ contextBridge.exposeInMainWorld('electron', {
     getLogs: (limit) => ipcRenderer.invoke('scheduler:getLogs', limit),
     clearLogs: () => ipcRenderer.invoke('scheduler:clearLogs'),
     getStatus: () => ipcRenderer.invoke('scheduler:getStatus'),
+    openBrowsers: (browserIds) => ipcRenderer.invoke('scheduler:openBrowsers', browserIds),
 
     // 监听定时任务状态
     onStatus: (callback) => {

@@ -194,6 +194,43 @@ class BitBrowserService {
   }
 
   /**
+   * 关闭所有浏览器
+   * @param {Array<string>} browserIds - 要关闭的浏览器ID列表
+   * @returns {Promise<Object>} 关闭结果
+   */
+  async closeAllBrowsers(browserIds) {
+    const results = {
+      success: true,
+      closed: 0,
+      failed: 0,
+      details: []
+    }
+
+    for (const browserId of browserIds) {
+      try {
+        const result = await this.closeBrowser(browserId)
+        if (result.success !== false) {
+          results.closed++
+          results.details.push({ browserId, success: true })
+        } else {
+          results.failed++
+          results.details.push({ browserId, success: false, error: result.error })
+        }
+      } catch (error) {
+        results.failed++
+        results.details.push({ browserId, success: false, error: error.message })
+      }
+    }
+
+    if (results.failed > 0 && results.closed === 0) {
+      results.success = false
+    }
+
+    console.log(`Closed ${results.closed} browsers, ${results.failed} failed`)
+    return results
+  }
+
+  /**
    * 删除浏览器配置
    * @param {string} profileId - 配置ID
    * @returns {Promise<Object>} 删除结果

@@ -758,6 +758,43 @@ class HubStudioService {
   }
 
   /**
+   * 关闭所有浏览器
+   * @param {Array<string>} containerCodes - 要关闭的环境ID列表
+   * @returns {Promise<Object>} 关闭结果
+   */
+  async closeAllBrowsers(containerCodes) {
+    const results = {
+      success: true,
+      closed: 0,
+      failed: 0,
+      details: []
+    }
+
+    for (const containerCode of containerCodes) {
+      try {
+        const result = await this.closeBrowser(containerCode)
+        if (result.success) {
+          results.closed++
+          results.details.push({ browserId: containerCode, success: true })
+        } else {
+          results.failed++
+          results.details.push({ browserId: containerCode, success: false, error: result.error })
+        }
+      } catch (error) {
+        results.failed++
+        results.details.push({ browserId: containerCode, success: false, error: error.message })
+      }
+    }
+
+    if (results.failed > 0 && results.closed === 0) {
+      results.success = false
+    }
+
+    console.log(`Closed ${results.closed} HubStudio browsers, ${results.failed} failed`)
+    return results
+  }
+
+  /**
    * 检查浏览器状态（通过获取活动环境列表）
    * @param {string} containerCode - 环境ID
    * @returns {Promise<Object>} 浏览器状态

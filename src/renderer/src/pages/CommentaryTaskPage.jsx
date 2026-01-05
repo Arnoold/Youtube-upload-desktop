@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import { Typography, Button, message, Table, Form, Input, Select, DatePicker, Space, Card, InputNumber, Tag, Modal, Progress, Popconfirm, Divider, Tabs, Empty, ConfigProvider, Row, Col, Checkbox } from 'antd'
-import { SearchOutlined, PlayCircleOutlined, ReloadOutlined, StopOutlined, PlusOutlined, DeleteOutlined, EyeOutlined, ArrowLeftOutlined, HistoryOutlined, AppstoreOutlined, CheckSquareOutlined } from '@ant-design/icons'
+import { SearchOutlined, PlayCircleOutlined, ReloadOutlined, StopOutlined, PlusOutlined, DeleteOutlined, EyeOutlined, ArrowLeftOutlined, HistoryOutlined, AppstoreOutlined, CheckSquareOutlined, PoweroffOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import utc from 'dayjs/plugin/utc'
 import timezone from 'dayjs/plugin/timezone'
@@ -31,6 +31,13 @@ const formatPublishTime = (date) => {
     return dayjs(date).tz('Asia/Shanghai').format('YYYY-MM-DD HH:mm:ss')
 }
 
+// 将UTC时间转换为本地时间显示
+const formatLocalTime = (date, format = 'MM-DD HH:mm') => {
+    if (!date) return '-'
+    // SQLite CURRENT_TIMESTAMP 存储的是UTC时间，需要转换为本地时间
+    return dayjs.utc(date).local().format(format)
+}
+
 // 状态映射
 const STATUS_MAP = {
     'pending': '等待中',
@@ -38,7 +45,8 @@ const STATUS_MAP = {
     'completed': '已完成',
     'failed': '失败',
     'cancelled': '已取消',
-    'error': '错误'
+    'error': '错误',
+    'video_deleted': '视频已删除'
 }
 
 const STATUS_COLOR_MAP = {
@@ -47,7 +55,8 @@ const STATUS_COLOR_MAP = {
     'completed': 'success',
     'failed': 'error',
     'cancelled': 'warning',
-    'error': 'error'
+    'error': 'error',
+    'video_deleted': 'warning'
 }
 
 const CommentaryTaskPage = () => {
@@ -60,10 +69,74 @@ const CommentaryTaskPage = () => {
         setActiveTab('workspace')
     }
 
+    // 关闭所有比特浏览器
+    const handleCloseAllBitBrowser = async () => {
+        try {
+            const result = await window.electron.browser.closeAllBitBrowser()
+            if (result.closed > 0) {
+                message.success(`已关闭 ${result.closed} 个比特浏览器`)
+            } else if (result.message) {
+                message.info(result.message)
+            } else {
+                message.info('没有需要关闭的比特浏览器')
+            }
+        } catch (error) {
+            message.error('关闭比特浏览器失败: ' + error.message)
+        }
+    }
+
+    // 关闭所有 HubStudio 浏览器
+    const handleCloseAllHubStudio = async () => {
+        try {
+            const result = await window.electron.browser.closeAllHubStudio()
+            if (result.closed > 0) {
+                message.success(`已关闭 ${result.closed} 个 HubStudio 浏览器`)
+            } else if (result.message) {
+                message.info(result.message)
+            } else {
+                message.info('没有需要关闭的 HubStudio 浏览器')
+            }
+        } catch (error) {
+            message.error('关闭 HubStudio 浏览器失败: ' + error.message)
+        }
+    }
+
     return (
         <ConfigProvider locale={zhCN}>
             <div style={{ paddingBottom: 20 }}>
-                <Title level={2}>解说词生成任务</Title>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                    <Title level={2} style={{ margin: 0 }}>解说词生成任务</Title>
+                    <Space>
+                        <Popconfirm
+                            title="确认关闭"
+                            description="确定要关闭所有比特浏览器吗？"
+                            onConfirm={handleCloseAllBitBrowser}
+                            okText="确定"
+                            cancelText="取消"
+                        >
+                            <Button
+                                icon={<PoweroffOutlined />}
+                                danger
+                            >
+                                关闭所有比特浏览器
+                            </Button>
+                        </Popconfirm>
+                        <Popconfirm
+                            title="确认关闭"
+                            description="确定要关闭所有HubStudio浏览器吗？"
+                            onConfirm={handleCloseAllHubStudio}
+                            okText="确定"
+                            cancelText="取消"
+                        >
+                            <Button
+                                icon={<PoweroffOutlined />}
+                                danger
+                            >
+                                关闭所有HubStudio浏览器
+                            </Button>
+                        </Popconfirm>
+                    </Space>
+                </div>
 
                 <Tabs
                     activeKey={activeTab}
@@ -148,13 +221,13 @@ const CreateTaskView = ({ onTaskCreated }) => {
         try {
             const values = await form.validateFields()
             const baseOptions = {
-                limit: 500, // 每页最大500条
+                limit: 200, // 每页200条，减少单次查询量避免超时
                 // 播放量输入的是"万"，需要乘以10000
                 minViews: values.minViews ? values.minViews * 10000 : undefined,
                 groupName: values.group,
                 channelIds: values.channels, // 支持多频道筛选
-                // Gemini生成状态筛选
-                status: values.generationStatus || undefined,
+                // Gemini生成状态筛选（支持多选）
+                statusList: values.generationStatus && values.generationStatus.length > 0 ? values.generationStatus : undefined,
                 sortBy: 'published_at',
                 sortOrder: 'desc'
             }
@@ -175,6 +248,11 @@ const CreateTaskView = ({ onTaskCreated }) => {
                 allVideos = allVideos.concat(result.data)
                 total = result.total
 
+                // 显示加载进度
+                if (total > baseOptions.limit) {
+                    message.loading({ content: `正在加载... ${allVideos.length}/${total}`, key: 'loadingVideos', duration: 0 })
+                }
+
                 // 如果获取的数据少于 limit，说明已经是最后一页
                 if (result.data.length < baseOptions.limit || allVideos.length >= total) {
                     break
@@ -187,10 +265,12 @@ const CreateTaskView = ({ onTaskCreated }) => {
                 }
             }
 
+            message.destroy('loadingVideos')
             setVideos(allVideos)
             message.success(`找到 ${total} 个视频，已加载 ${allVideos.length} 条`)
         } catch (error) {
-            message.error(`加载失败: ${error.message} `)
+            message.destroy('loadingVideos')
+            message.error(`加载失败: ${error.message}`)
         } finally {
             setLoading(false)
         }
@@ -244,7 +324,7 @@ const CreateTaskView = ({ onTaskCreated }) => {
             dayjs().add(1, 'day')       // 结束时间：往后推1天
         ],
         minViews: 10, // 默认：10万（输入框单位是"万"）
-        generationStatus: 'pending_all' // 默认：待生成
+        generationStatus: ['pending_all'] // 默认：待生成（多选模式需要数组）
     }
 
     return (
@@ -303,7 +383,7 @@ const CreateTaskView = ({ onTaskCreated }) => {
                     </Col>
                     <Col span={5} style={{ paddingLeft: 16 }}>
                         <Form.Item name="generationStatus" label="生成状态">
-                            <Select placeholder="全部" allowClear style={{ width: '100%' }}>
+                            <Select placeholder="全部" allowClear mode="multiple" maxTagCount={2} style={{ width: '100%' }}>
                                 <Option value="pending_all">待生成</Option>
                                 <Option value="generating">生成中</Option>
                                 <Option value="completed">已完成</Option>
@@ -327,7 +407,18 @@ const CreateTaskView = ({ onTaskCreated }) => {
                 <Button
                     type="primary"
                     icon={<PlusOutlined />}
-                    onClick={() => setCreateModalVisible(true)}
+                    onClick={() => {
+                        // 生成默认任务名称，包含日期范围
+                        const dateRange = form.getFieldValue('dateRange')
+                        let taskName = `任务 ${dayjs().format('MM-DD HH:mm')}`
+                        if (dateRange && dateRange.length === 2) {
+                            const startDate = dateRange[0].format('MM-DD')
+                            const endDate = dateRange[1].format('MM-DD')
+                            taskName = `任务 ${startDate} ~ ${endDate}`
+                        }
+                        createForm.setFieldsValue({ taskName })
+                        setCreateModalVisible(true)
+                    }}
                     disabled={videos.length === 0}
                     size="large"
                 >
@@ -351,7 +442,7 @@ const CreateTaskView = ({ onTaskCreated }) => {
                 onCancel={() => setCreateModalVisible(false)}
             >
                 <Form form={createForm} layout="vertical">
-                    <Form.Item name="taskName" label="任务名称" rules={[{ required: true, message: '请输入任务名称' }]} initialValue={`任务 ${dayjs().format('MM-DD HH:mm')} `}>
+                    <Form.Item name="taskName" label="任务名称" rules={[{ required: true, message: '请输入任务名称' }]}>
                         <Input placeholder="例如：2023-10-27 热门视频处理" />
                     </Form.Item>
                     <p>确认将 {videos.length} 个视频添加到此任务吗？</p>
@@ -365,7 +456,7 @@ const CreateTaskView = ({ onTaskCreated }) => {
 const TaskExecutionView = ({ taskId, onBack }) => {
     const [task, setTask] = useState(null)
     const [items, setItems] = useState([])
-    const [stats, setStats] = useState({ total: 0, completed: 0, failed: 0, pending: 0, processing: 0 })
+    const [stats, setStats] = useState({ total: 0, completed: 0, failed: 0, pending: 0, processing: 0, video_deleted: 0 })
     const [loading, setLoading] = useState(false)
     const [browserProfiles, setBrowserProfiles] = useState([])
     const [selectedProfiles, setSelectedProfiles] = useState([]) // 改为数组，支持多选
@@ -376,6 +467,7 @@ const TaskExecutionView = ({ taskId, onBack }) => {
     const [resultModalContent, setResultModalContent] = useState(null)
     const [browserSelectModalVisible, setBrowserSelectModalVisible] = useState(false) // 浏览器选择弹窗
     const [tempSelectedProfiles, setTempSelectedProfiles] = useState([]) // 弹窗中的临时选择
+    const [usageStats, setUsageStats] = useState({}) // 账号使用统计 { bit_browser_id: { daily_count, total_count } }
 
     // 显示结果弹窗
     const showResultModal = (content, isError = false) => {
@@ -383,9 +475,27 @@ const TaskExecutionView = ({ taskId, onBack }) => {
         setResultModalVisible(true)
     }
 
+    // 加载使用统计
+    const loadUsageStats = async () => {
+        try {
+            const stats = await window.electron.aiStudio.getUsageStats()
+            // 转换为以 bit_browser_id 为 key 的对象
+            const statsMap = {}
+            stats.forEach(s => {
+                if (s.bit_browser_id) {
+                    statsMap[s.bit_browser_id] = s
+                }
+            })
+            setUsageStats(statsMap)
+        } catch (e) {
+            console.error('Failed to load usage stats:', e)
+        }
+    }
+
     // 打开浏览器选择弹窗
     const openBrowserSelectModal = () => {
         setTempSelectedProfiles([...selectedProfiles])
+        loadUsageStats() // 加载统计
         setBrowserSelectModalVisible(true)
     }
 
@@ -393,6 +503,12 @@ const TaskExecutionView = ({ taskId, onBack }) => {
     const confirmBrowserSelect = () => {
         setSelectedProfiles(tempSelectedProfiles)
         setBrowserSelectModalVisible(false)
+        // 保存选择到 localStorage
+        try {
+            localStorage.setItem('commentary_selected_browsers', JSON.stringify(tempSelectedProfiles))
+        } catch (e) {
+            console.error('Failed to save browser selection:', e)
+        }
     }
 
     // 全选/取消全选
@@ -447,7 +563,25 @@ const TaskExecutionView = ({ taskId, onBack }) => {
     const loadProfiles = async () => {
         try {
             const profiles = await window.electron.db.getAIStudioAccounts()
-            setBrowserProfiles(profiles.filter(p => p.status === 'active'))
+            const activeProfiles = profiles.filter(p => p.status === 'active')
+            setBrowserProfiles(activeProfiles)
+
+            // 从 localStorage 恢复上次选中的浏览器
+            try {
+                const savedSelection = localStorage.getItem('commentary_selected_browsers')
+                if (savedSelection) {
+                    const savedIds = JSON.parse(savedSelection)
+                    // 只恢复仍然存在且活跃的浏览器
+                    const validIds = savedIds.filter(id =>
+                        activeProfiles.some(p => p.bit_browser_id === id)
+                    )
+                    if (validIds.length > 0) {
+                        setSelectedProfiles(validIds)
+                    }
+                }
+            } catch (e) {
+                console.error('Failed to restore browser selection:', e)
+            }
         } catch (error) { console.error(error) }
     }
 
@@ -553,6 +687,18 @@ const TaskExecutionView = ({ taskId, onBack }) => {
         }
     }
 
+    const handleForceReset = async () => {
+        try {
+            await window.electron.aiStudio.forceReset()
+            setProcessing(false)
+            setWorkerProgress({})
+            message.success('状态已重置')
+            loadTaskAndItems()
+        } catch (error) {
+            message.error('重置失败: ' + error.message)
+        }
+    }
+
     const itemColumns = [
         { title: 'ID', dataIndex: 'video_id', width: 80, render: (id) => id ? Math.floor(id) : '-' },
         { title: '标题', dataIndex: 'video_info', render: info => info?.title || '-' },
@@ -643,7 +789,11 @@ const TaskExecutionView = ({ taskId, onBack }) => {
                                 <div style={{ fontSize: 12, color: '#666' }}>失败</div>
                             </div>
                             <div style={{ textAlign: 'center' }}>
-                                <div style={{ fontSize: 24, fontWeight: 'bold', color: '#faad14' }}>{stats.processing}</div>
+                                <div style={{ fontSize: 24, fontWeight: 'bold', color: '#faad14' }}>{stats.video_deleted || 0}</div>
+                                <div style={{ fontSize: 12, color: '#666' }}>已删除</div>
+                            </div>
+                            <div style={{ textAlign: 'center' }}>
+                                <div style={{ fontSize: 24, fontWeight: 'bold', color: '#722ed1' }}>{stats.processing}</div>
                                 <div style={{ fontSize: 12, color: '#666' }}>执行中</div>
                             </div>
                             <div style={{ textAlign: 'center' }}>
@@ -655,14 +805,14 @@ const TaskExecutionView = ({ taskId, onBack }) => {
                             <div style={{ textAlign: 'left', fontSize: 12 }}>
                                 {task?.started_at ? (
                                     <>
-                                        <div><Text type="secondary">开始:</Text> {dayjs(task.started_at).format('MM-DD HH:mm:ss')}</div>
+                                        <div><Text type="secondary">开始:</Text> {formatLocalTime(task.started_at, 'MM-DD HH:mm:ss')}</div>
                                         {task?.finished_at ? (
                                             <>
-                                                <div><Text type="secondary">结束:</Text> {dayjs(task.finished_at).format('MM-DD HH:mm:ss')}</div>
+                                                <div><Text type="secondary">结束:</Text> {formatLocalTime(task.finished_at, 'MM-DD HH:mm:ss')}</div>
                                                 <div>
                                                     <Text type="success">
                                                         耗时: {(() => {
-                                                            const diff = dayjs(task.finished_at).diff(dayjs(task.started_at), 'second')
+                                                            const diff = dayjs.utc(task.finished_at).diff(dayjs.utc(task.started_at), 'second')
                                                             if (diff < 60) return `${diff}秒`
                                                             if (diff < 3600) return `${Math.floor(diff / 60)}分${diff % 60}秒`
                                                             return `${Math.floor(diff / 3600)}时${Math.floor((diff % 3600) / 60)}分`
@@ -708,13 +858,16 @@ const TaskExecutionView = ({ taskId, onBack }) => {
                         icon={<PlayCircleOutlined />}
                         onClick={handleStart}
                         loading={processing}
-                        disabled={selectedProfiles.length === 0 || stats.pending === 0}
+                        disabled={selectedProfiles.length === 0 || (stats.pending === 0 && stats.failed === 0)}
                     >
                         {selectedProfiles.length > 1 ? `并行执行 (${selectedProfiles.length}个浏览器)` : '开始执行'}
-                        {stats.pending > 0 && ` - 剩余${stats.pending}条`}
+                        {(stats.pending > 0 || stats.failed > 0) && ` - 剩余${stats.pending + stats.failed}条`}
                     </Button>
                     {processing && <Button danger icon={<StopOutlined />} onClick={handleStop}>停止</Button>}
                     <Button icon={<ReloadOutlined />} onClick={loadTaskAndItems}>刷新列表</Button>
+                    <Popconfirm title="确定要强制重置状态吗？这会清除当前的执行状态。" onConfirm={handleForceReset}>
+                        <Button type="text" danger size="small">状态卡住？点击重置</Button>
+                    </Popconfirm>
                 </Space>
             </div>
 
@@ -835,15 +988,30 @@ const TaskExecutionView = ({ taskId, onBack }) => {
                                                 fontWeight: 500,
                                                 overflow: 'hidden',
                                                 textOverflow: 'ellipsis',
-                                                whiteSpace: 'nowrap'
+                                                whiteSpace: 'nowrap',
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                gap: 6
                                             }}>
                                                 {profile.name}
+                                                {usageStats[profile.bit_browser_id] && (
+                                                    <>
+                                                        <Tag color="blue" style={{ fontSize: 10, padding: '0 4px', margin: 0 }}>
+                                                            发送 {usageStats[profile.bit_browser_id].daily_count}
+                                                        </Tag>
+                                                        <Tag color="green" style={{ fontSize: 10, padding: '0 4px', margin: 0 }}>
+                                                            成功 {usageStats[profile.bit_browser_id].daily_success_count || 0}
+                                                        </Tag>
+                                                    </>
+                                                )}
                                             </div>
-                                            {profile.bit_browser_id && (
-                                                <div style={{ fontSize: 11, color: '#999', marginTop: 2 }}>
-                                                    ID: {profile.bit_browser_id.substring(0, 8)}...
-                                                </div>
-                                            )}
+                                            <div style={{ fontSize: 11, color: '#999', marginTop: 2 }}>
+                                                {usageStats[profile.bit_browser_id] ? (
+                                                    <span>累计: 发送 {usageStats[profile.bit_browser_id].total_count} / 成功 {usageStats[profile.bit_browser_id].total_success_count || 0}</span>
+                                                ) : (
+                                                    <span>累计: 发送 0 / 成功 0</span>
+                                                )}
+                                            </div>
                                         </div>
                                     </div>
                                 </Col>
@@ -895,7 +1063,7 @@ const HistoryTab = ({ onLoadTask, isActive }) => {
             key: 'progress',
             width: 280,
             render: (_, record) => {
-                const stats = record.stats || { total: 0, completed: 0, failed: 0, pending: 0, processing: 0 }
+                const stats = record.stats || { total: 0, completed: 0, failed: 0, pending: 0, processing: 0, video_deleted: 0 }
                 const progressPercent = stats.total > 0 ? Math.round((stats.completed / stats.total) * 100) : 0
                 return (
                     <div>
@@ -903,6 +1071,7 @@ const HistoryTab = ({ onLoadTask, isActive }) => {
                             <Tag>总计: {stats.total}</Tag>
                             <Tag color="success">成功: {stats.completed}</Tag>
                             <Tag color="error">失败: {stats.failed}</Tag>
+                            {stats.video_deleted > 0 && <Tag color="warning">已删除: {stats.video_deleted}</Tag>}
                             <Tag color="default">待执行: {stats.pending}</Tag>
                             {stats.processing > 0 && <Tag color="processing">执行中: {stats.processing}</Tag>}
                         </div>
@@ -930,8 +1099,8 @@ const HistoryTab = ({ onLoadTask, isActive }) => {
             key: 'time',
             width: 200,
             render: (_, record) => {
-                const started = record.started_at ? dayjs(record.started_at) : null
-                const finished = record.finished_at ? dayjs(record.finished_at) : null
+                const started = record.started_at ? dayjs.utc(record.started_at) : null
+                const finished = record.finished_at ? dayjs.utc(record.finished_at) : null
 
                 // 计算耗时
                 let duration = null
@@ -952,10 +1121,10 @@ const HistoryTab = ({ onLoadTask, isActive }) => {
                     <div style={{ fontSize: 12 }}>
                         {started ? (
                             <>
-                                <div><Text type="secondary">开始:</Text> {started.format('MM-DD HH:mm')}</div>
+                                <div><Text type="secondary">开始:</Text> {started.local().format('MM-DD HH:mm')}</div>
                                 {finished ? (
                                     <>
-                                        <div><Text type="secondary">结束:</Text> {finished.format('MM-DD HH:mm')}</div>
+                                        <div><Text type="secondary">结束:</Text> {finished.local().format('MM-DD HH:mm')}</div>
                                         <div><Text type="success">耗时: {duration}</Text></div>
                                     </>
                                 ) : (
@@ -969,7 +1138,7 @@ const HistoryTab = ({ onLoadTask, isActive }) => {
                 )
             }
         },
-        { title: '创建时间', dataIndex: 'created_at', width: 130, render: d => dayjs(d).format('MM-DD HH:mm') },
+        { title: '创建时间', dataIndex: 'created_at', width: 130, render: d => formatLocalTime(d) },
         {
             title: '操作',
             key: 'action',

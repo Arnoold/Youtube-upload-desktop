@@ -198,6 +198,26 @@ class DatabaseService {
       )
     `)
 
+    // 创建 AI Studio 账号使用统计表
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS ai_studio_usage_stats (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_id INTEGER NOT NULL,
+        daily_count INTEGER DEFAULT 0,
+        total_count INTEGER DEFAULT 0,
+        daily_success_count INTEGER DEFAULT 0,
+        total_success_count INTEGER DEFAULT 0,
+        last_reset_date TEXT,
+        last_used_at DATETIME,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (account_id) REFERENCES ai_studio_accounts (id)
+      )
+    `)
+
+    // 迁移：为 ai_studio_usage_stats 添加成功次数字段
+    this.migrateAIStudioUsageStats()
+
     // 迁移：为 upload_logs 表添加时区字段（必须在表创建之后）
     this.migrateUploadLogs()
 
@@ -281,6 +301,23 @@ class DatabaseService {
     if (!columnNames.includes('scheduled_timezone')) {
       this.db.exec("ALTER TABLE upload_logs ADD COLUMN scheduled_timezone TEXT")
       console.log('Added scheduled_timezone column to upload_logs')
+    }
+  }
+
+  migrateAIStudioUsageStats() {
+    const columns = this.db.pragma('table_info(ai_studio_usage_stats)')
+    const columnNames = columns.map(col => col.name)
+
+    // 添加 daily_success_count 字段
+    if (!columnNames.includes('daily_success_count')) {
+      this.db.exec('ALTER TABLE ai_studio_usage_stats ADD COLUMN daily_success_count INTEGER DEFAULT 0')
+      console.log('Added daily_success_count column to ai_studio_usage_stats')
+    }
+
+    // 添加 total_success_count 字段
+    if (!columnNames.includes('total_success_count')) {
+      this.db.exec('ALTER TABLE ai_studio_usage_stats ADD COLUMN total_success_count INTEGER DEFAULT 0')
+      console.log('Added total_success_count column to ai_studio_usage_stats')
     }
   }
 
@@ -454,6 +491,10 @@ class DatabaseService {
     return this.db.prepare('SELECT * FROM ai_studio_accounts ORDER BY created_at DESC').all()
   }
 
+  getAIStudioAccountByBrowserId(bitBrowserId) {
+    return this.db.prepare('SELECT * FROM ai_studio_accounts WHERE bit_browser_id = ?').get(bitBrowserId)
+  }
+
   updateAIStudioAccount(id, updates) {
     const fields = Object.keys(updates).map(key => {
       const snakeKey = key.replace(/([A-Z])/g, '_$1').toLowerCase()
@@ -571,7 +612,8 @@ class DatabaseService {
         SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
         SUM(CASE WHEN status = 'failed' OR status = 'error' THEN 1 ELSE 0 END) as failed,
         SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
-        SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as processing
+        SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as processing,
+        SUM(CASE WHEN status = 'video_deleted' THEN 1 ELSE 0 END) as video_deleted
       FROM commentary_task_items
       WHERE task_id = ?
     `).get(taskId)
@@ -581,21 +623,46 @@ class DatabaseService {
       completed: stats.completed || 0,
       failed: stats.failed || 0,
       pending: stats.pending || 0,
-      processing: stats.processing || 0
+      processing: stats.processing || 0,
+      video_deleted: stats.video_deleted || 0
     }
   }
 
-  // 获取所有解说词任务及其统计信息
+  // 获取所有解说词任务及其统计信息（优化版：单次查询所有统计）
   getCommentaryTasksWithStats() {
-    const tasks = this.db.prepare('SELECT * FROM commentary_tasks ORDER BY created_at DESC').all()
-    return tasks.map(task => {
-      const stats = this.getCommentaryTaskStats(task.id)
-      return {
-        ...task,
-        filters: JSON.parse(task.filters || '{}'),
-        stats
+    // 使用 LEFT JOIN 和 GROUP BY 一次性获取所有任务及其统计信息
+    const tasksWithStats = this.db.prepare(`
+      SELECT
+        t.*,
+        COUNT(i.id) as total,
+        SUM(CASE WHEN i.status = 'completed' THEN 1 ELSE 0 END) as completed,
+        SUM(CASE WHEN i.status = 'failed' OR i.status = 'error' THEN 1 ELSE 0 END) as failed,
+        SUM(CASE WHEN i.status = 'pending' THEN 1 ELSE 0 END) as pending,
+        SUM(CASE WHEN i.status = 'processing' THEN 1 ELSE 0 END) as processing,
+        SUM(CASE WHEN i.status = 'video_deleted' THEN 1 ELSE 0 END) as video_deleted
+      FROM commentary_tasks t
+      LEFT JOIN commentary_task_items i ON t.id = i.task_id
+      GROUP BY t.id
+      ORDER BY t.created_at DESC
+    `).all()
+
+    return tasksWithStats.map(task => ({
+      id: task.id,
+      name: task.name,
+      status: task.status,
+      filters: JSON.parse(task.filters || '{}'),
+      created_at: task.created_at,
+      started_at: task.started_at,
+      finished_at: task.finished_at,
+      stats: {
+        total: task.total || 0,
+        completed: task.completed || 0,
+        failed: task.failed || 0,
+        pending: task.pending || 0,
+        processing: task.processing || 0,
+        video_deleted: task.video_deleted || 0
       }
-    })
+    }))
   }
 
   // ===== 设置相关方法 =====
@@ -805,6 +872,175 @@ class DatabaseService {
   getLastUserSyncTime() {
     const row = this.db.prepare('SELECT MAX(synced_at) as last_sync FROM cached_users').get()
     return row ? row.last_sync : null
+  }
+
+  // ==================== AI Studio 使用统计方法 ====================
+
+  /**
+   * 获取当前太平洋时间的日期字符串（用于判断是否需要重置）
+   * Google AI Studio 在太平洋时间午夜重置
+   */
+  getPacificDateString() {
+    const now = new Date()
+    // 太平洋时间偏移：冬令时 UTC-8，夏令时 UTC-7
+    // 使用 Intl.DateTimeFormat 来自动处理夏令时
+    const formatter = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Los_Angeles',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    })
+    return formatter.format(now) // 返回 YYYY-MM-DD 格式
+  }
+
+  /**
+   * 记录一次 AI Studio 发送（点击发送按钮就算一次）
+   * @param {number} accountId - AI Studio 账号 ID
+   */
+  recordAIStudioUsage(accountId) {
+    const currentPacificDate = this.getPacificDateString()
+
+    // 查找该账号的统计记录
+    let stats = this.db.prepare(`
+      SELECT * FROM ai_studio_usage_stats WHERE account_id = ?
+    `).get(accountId)
+
+    if (!stats) {
+      // 创建新记录
+      this.db.prepare(`
+        INSERT INTO ai_studio_usage_stats (account_id, daily_count, total_count, daily_success_count, total_success_count, last_reset_date, last_used_at)
+        VALUES (?, 1, 1, 0, 0, ?, CURRENT_TIMESTAMP)
+      `).run(accountId, currentPacificDate)
+    } else {
+      // 检查是否需要重置每日计数（太平洋时间新的一天）
+      if (stats.last_reset_date !== currentPacificDate) {
+        // 新的一天，重置 daily_count 和 daily_success_count
+        this.db.prepare(`
+          UPDATE ai_studio_usage_stats
+          SET daily_count = 1, total_count = total_count + 1, daily_success_count = 0, last_reset_date = ?, last_used_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+          WHERE account_id = ?
+        `).run(currentPacificDate, accountId)
+      } else {
+        // 同一天，累加计数
+        this.db.prepare(`
+          UPDATE ai_studio_usage_stats
+          SET daily_count = daily_count + 1, total_count = total_count + 1, last_used_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+          WHERE account_id = ?
+        `).run(accountId)
+      }
+    }
+  }
+
+  /**
+   * 记录一次 AI Studio 成功获取解说词
+   * @param {number} accountId - AI Studio 账号 ID
+   */
+  recordAIStudioSuccess(accountId) {
+    const currentPacificDate = this.getPacificDateString()
+
+    // 查找该账号的统计记录
+    let stats = this.db.prepare(`
+      SELECT * FROM ai_studio_usage_stats WHERE account_id = ?
+    `).get(accountId)
+
+    if (!stats) {
+      // 不应该发生，因为 recordAIStudioUsage 应该先被调用
+      // 但为了安全，还是创建一条记录
+      this.db.prepare(`
+        INSERT INTO ai_studio_usage_stats (account_id, daily_count, total_count, daily_success_count, total_success_count, last_reset_date, last_used_at)
+        VALUES (?, 0, 0, 1, 1, ?, CURRENT_TIMESTAMP)
+      `).run(accountId, currentPacificDate)
+    } else {
+      // 检查是否需要重置每日计数
+      if (stats.last_reset_date !== currentPacificDate) {
+        // 新的一天，重置后加1
+        this.db.prepare(`
+          UPDATE ai_studio_usage_stats
+          SET daily_success_count = 1, total_success_count = total_success_count + 1, last_reset_date = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE account_id = ?
+        `).run(currentPacificDate, accountId)
+      } else {
+        // 同一天，累加成功计数
+        this.db.prepare(`
+          UPDATE ai_studio_usage_stats
+          SET daily_success_count = daily_success_count + 1, total_success_count = total_success_count + 1, updated_at = CURRENT_TIMESTAMP
+          WHERE account_id = ?
+        `).run(accountId)
+      }
+    }
+  }
+
+  /**
+   * 获取 AI Studio 账号使用统计
+   * @param {number} accountId - 账号 ID（可选，不传则返回所有账号统计）
+   */
+  getAIStudioUsageStats(accountId = null) {
+    const currentPacificDate = this.getPacificDateString()
+
+    if (accountId) {
+      const stats = this.db.prepare(`
+        SELECT s.*, a.name as account_name, a.bit_browser_id
+        FROM ai_studio_usage_stats s
+        JOIN ai_studio_accounts a ON s.account_id = a.id
+        WHERE s.account_id = ?
+      `).get(accountId)
+
+      if (stats) {
+        // 如果日期不匹配，说明需要重置每日计数（但不更新数据库，只在返回时显示为0）
+        if (stats.last_reset_date !== currentPacificDate) {
+          stats.daily_count = 0
+          stats.daily_success_count = 0
+        }
+      }
+      return stats
+    }
+
+    // 返回所有账号的统计，并关联账号信息
+    const allStats = this.db.prepare(`
+      SELECT a.id as account_id, a.name as account_name, a.bit_browser_id, a.status,
+             COALESCE(s.daily_count, 0) as daily_count,
+             COALESCE(s.total_count, 0) as total_count,
+             COALESCE(s.daily_success_count, 0) as daily_success_count,
+             COALESCE(s.total_success_count, 0) as total_success_count,
+             s.last_reset_date,
+             s.last_used_at
+      FROM ai_studio_accounts a
+      LEFT JOIN ai_studio_usage_stats s ON a.id = s.account_id
+      WHERE a.status = 'active'
+      ORDER BY a.name
+    `).all()
+
+    // 检查并调整每日计数
+    return allStats.map(stats => {
+      if (stats.last_reset_date !== currentPacificDate) {
+        stats.daily_count = 0
+        stats.daily_success_count = 0
+      }
+      return stats
+    })
+  }
+
+  /**
+   * 手动重置某个账号的每日计数
+   */
+  resetAIStudioDailyCount(accountId) {
+    const currentPacificDate = this.getPacificDateString()
+    this.db.prepare(`
+      UPDATE ai_studio_usage_stats
+      SET daily_count = 0, last_reset_date = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE account_id = ?
+    `).run(currentPacificDate, accountId)
+  }
+
+  /**
+   * 重置所有账号的每日计数
+   */
+  resetAllAIStudioDailyCounts() {
+    const currentPacificDate = this.getPacificDateString()
+    this.db.prepare(`
+      UPDATE ai_studio_usage_stats
+      SET daily_count = 0, last_reset_date = ?, updated_at = CURRENT_TIMESTAMP
+    `).run(currentPacificDate)
   }
 
   close() {

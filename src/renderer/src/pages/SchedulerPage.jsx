@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { Typography, Card, Switch, TimePicker, InputNumber, Button, Space, Table, Tag, message, Popconfirm, Alert, Progress, Statistic, Row, Col, Divider, Modal, Checkbox, Select } from 'antd'
-import { ClockCircleOutlined, PlayCircleOutlined, DeleteOutlined, ReloadOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined, HistoryOutlined, SettingOutlined } from '@ant-design/icons'
+import { ClockCircleOutlined, PlayCircleOutlined, DeleteOutlined, ReloadOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined, HistoryOutlined, SettingOutlined, ChromeOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 
 const { Title, Text, Paragraph } = Typography
@@ -38,6 +38,7 @@ const SchedulerPage = () => {
     const [browserModalVisible, setBrowserModalVisible] = useState(false)
     const [allBrowsers, setAllBrowsers] = useState([])
     const [tempSelectedBrowserIds, setTempSelectedBrowserIds] = useState([])
+    const [openingBrowsers, setOpeningBrowsers] = useState(false)
 
     // 加载浏览器列表
     const loadBrowsers = async () => {
@@ -191,6 +192,75 @@ const SchedulerPage = () => {
         return `已选 ${selectedCount} 个浏览器`
     }
 
+    // 打开所有已选浏览器
+    const handleOpenBrowsers = async () => {
+        // 获取要打开的浏览器列表
+        let browserIdsToOpen = config.selectedBrowserIds
+        if (!browserIdsToOpen || browserIdsToOpen.length === 0) {
+            browserIdsToOpen = allBrowsers.map(b => b.bit_browser_id)
+        }
+
+        if (browserIdsToOpen.length === 0) {
+            message.warning('没有可用的浏览器')
+            return
+        }
+
+        setOpeningBrowsers(true)
+        try {
+            const results = await window.electron.scheduler.openBrowsers(browserIdsToOpen)
+
+            // 统计结果
+            const successCount = results.filter(r => r.success).length
+            const failedResults = results.filter(r => !r.success)
+
+            if (failedResults.length === 0) {
+                message.success(`成功打开 ${successCount} 个浏览器`)
+            } else if (successCount === 0) {
+                // 全部失败，显示详细错误
+                Modal.error({
+                    title: '打开浏览器失败',
+                    content: (
+                        <div style={{ maxHeight: 300, overflow: 'auto' }}>
+                            {failedResults.map((r, idx) => (
+                                <div key={idx} style={{ marginBottom: 8 }}>
+                                    <Text strong>{r.name || r.browserId}:</Text>
+                                    <br />
+                                    <Text type="danger">{r.error}</Text>
+                                </div>
+                            ))}
+                        </div>
+                    )
+                })
+            } else {
+                // 部分成功
+                Modal.warning({
+                    title: `打开浏览器结果`,
+                    content: (
+                        <div style={{ maxHeight: 300, overflow: 'auto' }}>
+                            <div style={{ marginBottom: 12 }}>
+                                <Text type="success">成功: {successCount} 个</Text>
+                                <Text type="danger" style={{ marginLeft: 16 }}>失败: {failedResults.length} 个</Text>
+                            </div>
+                            <Divider style={{ margin: '8px 0' }} />
+                            <Text strong>失败详情:</Text>
+                            {failedResults.map((r, idx) => (
+                                <div key={idx} style={{ marginTop: 8 }}>
+                                    <Text>{r.name || r.browserId}:</Text>
+                                    <br />
+                                    <Text type="danger" style={{ fontSize: 12 }}>{r.error}</Text>
+                                </div>
+                            ))}
+                        </div>
+                    )
+                })
+            }
+        } catch (error) {
+            message.error('打开浏览器失败: ' + error.message)
+        } finally {
+            setOpeningBrowsers(false)
+        }
+    }
+
     const logColumns = [
         {
             title: '时间',
@@ -342,6 +412,13 @@ const SchedulerPage = () => {
                                 </div>
                                 <Space>
                                     <Tag color="blue">{getSelectedBrowsersText()}</Tag>
+                                    <Button
+                                        icon={<ChromeOutlined />}
+                                        onClick={handleOpenBrowsers}
+                                        loading={openingBrowsers}
+                                    >
+                                        打开浏览器
+                                    </Button>
                                     <Button
                                         icon={<SettingOutlined />}
                                         onClick={openBrowserModal}

@@ -38,7 +38,32 @@ class SupabaseService {
     const createClientFn = this.getCreateClient()
     this.config.url = url
     this.config.apiKey = apiKey
-    this.client = createClientFn(url, apiKey)
+
+    // 自定义 fetch，增加超时控制
+    const fetchWithTimeout = async (url, options = {}) => {
+      const timeout = 120000 // 120 秒超时
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), timeout)
+
+      try {
+        const response = await fetch(url, {
+          ...options,
+          signal: controller.signal
+        })
+        return response
+      } finally {
+        clearTimeout(timeoutId)
+      }
+    }
+
+    this.client = createClientFn(url, apiKey, {
+      db: {
+        schema: 'public'
+      },
+      global: {
+        fetch: fetchWithTimeout
+      }
+    })
 
     return true
   }
@@ -162,16 +187,18 @@ class SupabaseService {
       .from(this.config.tableName)
       .select(selectFields, { count: 'exact' })
 
-    // 生成状态筛选
-    if (options.status) {
+    // 生成状态筛选（支持多选）
+    if (options.statusList && options.statusList.length > 0) {
+      // 多选模式
+      const statusValues = options.statusList.map(s => s === 'pending_all' ? 'pending' : s)
+      query = query.in('generation_status', statusValues)
+    } else if (options.status) {
+      // 兼容旧的单选模式
       if (options.status === 'pending_all' || options.status === 'null') {
-        // 筛选待生成的记录（数据库中所有新记录都是 pending 状态）
-        // 兼容旧的 'null' 选项值
         query = query.eq('generation_status', 'pending')
       } else if (options.status !== 'all') {
         query = query.eq('generation_status', options.status)
       }
-      // status === 'all' 时不添加筛选条件
     }
 
     // 日期范围筛选

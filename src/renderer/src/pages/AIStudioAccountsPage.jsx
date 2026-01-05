@@ -18,6 +18,23 @@ const AIStudioAccountsPage = () => {
     const [editingProfile, setEditingProfile] = useState(null)
     const [form] = Form.useForm()
     const [checkingStatus, setCheckingStatus] = useState(false)
+    const [usageStats, setUsageStats] = useState({}) // 使用统计
+
+    // 加载使用统计
+    const loadUsageStats = async () => {
+        try {
+            const stats = await window.electron.aiStudio.getUsageStats()
+            const statsMap = {}
+            stats.forEach(s => {
+                if (s.bit_browser_id) {
+                    statsMap[s.bit_browser_id] = s
+                }
+            })
+            setUsageStats(statsMap)
+        } catch (e) {
+            console.error('Failed to load usage stats:', e)
+        }
+    }
 
     // 加载配置
     const loadProfiles = async () => {
@@ -53,6 +70,9 @@ const AIStudioAccountsPage = () => {
 
             console.log('AIStudioAccountsPage: Profiles with status:', profilesWithStatus)
             setProfiles(profilesWithStatus)
+
+            // 同时加载使用统计
+            await loadUsageStats()
         } catch (error) {
             console.error('AIStudioAccountsPage: Load failed:', error)
             message.error(`加载失败: ${error.message}`)
@@ -183,6 +203,36 @@ const AIStudioAccountsPage = () => {
                     {isRunning ? '运行中' : '未运行'}
                 </Tag>
             )
+        },
+        {
+            title: '今日统计',
+            key: 'daily_stats',
+            width: 150,
+            render: (_, record) => {
+                const stats = usageStats[record.bit_browser_id]
+                if (!stats) return <span style={{ color: '#999' }}>-</span>
+                return (
+                    <Space size={4}>
+                        <Tag color="blue">发送 {stats.daily_count || 0}</Tag>
+                        <Tag color="green">成功 {stats.daily_success_count || 0}</Tag>
+                    </Space>
+                )
+            }
+        },
+        {
+            title: '累计统计',
+            key: 'total_stats',
+            width: 150,
+            render: (_, record) => {
+                const stats = usageStats[record.bit_browser_id]
+                if (!stats) return <span style={{ color: '#999' }}>-</span>
+                return (
+                    <Space size={4}>
+                        <Tag>发送 {stats.total_count || 0}</Tag>
+                        <Tag>成功 {stats.total_success_count || 0}</Tag>
+                    </Space>
+                )
+            }
         },
         {
             title: '操作',

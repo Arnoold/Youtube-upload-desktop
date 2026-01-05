@@ -626,6 +626,35 @@ function setupIPC(mainWindow, services) {
     }
   })
 
+  ipcMain.handle('aistudio:force-reset', async () => {
+    try {
+      return aiStudioService.forceReset()
+    } catch (error) {
+      console.error('aistudio:force-reset error:', error)
+      throw error
+    }
+  })
+
+  // AI Studio 使用统计
+  ipcMain.handle('aistudio:get-usage-stats', async () => {
+    try {
+      return dbService.getAIStudioUsageStats()
+    } catch (error) {
+      console.error('aistudio:get-usage-stats error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('aistudio:reset-daily-count', async (event, accountId) => {
+    try {
+      dbService.resetAIStudioDailyCount(accountId)
+      return true
+    } catch (error) {
+      console.error('aistudio:reset-daily-count error:', error)
+      throw error
+    }
+  })
+
   // 固定的 AI Studio 浏览器配置 (作为默认值)
   const DEFAULT_BROWSER_ID = '0e7f85a348654b618508dc873b78389d'
   const AI_STUDIO_URL = 'https://aistudio.google.com/prompts/new_chat'
@@ -1330,6 +1359,120 @@ function setupIPC(mainWindow, services) {
     } catch (error) {
       console.error('scheduler:getStatus error:', error)
       throw error
+    }
+  })
+
+  // 批量打开浏览器
+  ipcMain.handle('scheduler:openBrowsers', async (event, browserIds) => {
+    const { chromium } = require('playwright-core')
+    const results = []
+    const AI_STUDIO_URL = 'https://aistudio.google.com/prompts/new_chat'
+
+    for (const browserId of browserIds) {
+      try {
+        // 获取账号信息以确定浏览器类型
+        const account = dbService.getAIStudioAccountByBrowserId(browserId)
+        if (!account) {
+          results.push({
+            browserId,
+            success: false,
+            error: `未找到浏览器账号: ${browserId}`
+          })
+          continue
+        }
+
+        const browserType = account.browser_type || 'bitbrowser'
+        let browserService
+
+        if (browserType === 'hubstudio') {
+          browserService = hubStudioService
+        } else {
+          browserService = bitBrowserService
+        }
+
+        // 启动浏览器
+        const result = await browserService.startBrowser(browserId)
+
+        // 如果启动成功且有 wsEndpoint，打开 AI Studio 页面
+        if (result.success !== false && result.wsEndpoint) {
+          try {
+            const browser = await chromium.connectOverCDP(result.wsEndpoint)
+            const context = browser.contexts()[0]
+            const page = await context.newPage()
+            await page.goto(AI_STUDIO_URL, { waitUntil: 'domcontentloaded', timeout: 30000 })
+            // 断开连接但不关闭浏览器
+            await browser.close()
+          } catch (pageError) {
+            console.error(`Failed to open AI Studio page for ${browserId}:`, pageError.message)
+            // 页面打开失败不影响整体结果，浏览器已经启动成功
+          }
+        }
+
+        results.push({
+          browserId,
+          name: account.name,
+          success: true,
+          result
+        })
+      } catch (error) {
+        // 获取账号名称用于显示
+        let accountName = browserId
+        try {
+          const account = dbService.getAIStudioAccountByBrowserId(browserId)
+          if (account) accountName = account.name
+        } catch (e) { }
+
+        results.push({
+          browserId,
+          name: accountName,
+          success: false,
+          error: error.message
+        })
+      }
+    }
+
+    return results
+  })
+
+  // 关闭所有比特浏览器
+  ipcMain.handle('browser:closeAllBitBrowser', async () => {
+    try {
+      // 获取所有比特浏览器类型的账号
+      const accounts = dbService.getAIStudioAccounts()
+      const bitBrowserIds = accounts
+        .filter(a => a.browser_type === 'bitbrowser' || !a.browser_type)
+        .map(a => a.bit_browser_id)
+
+      if (bitBrowserIds.length === 0) {
+        return { success: true, closed: 0, message: '没有比特浏览器账号' }
+      }
+
+      const result = await bitBrowserService.closeAllBrowsers(bitBrowserIds)
+      return result
+    } catch (error) {
+      console.error('browser:closeAllBitBrowser error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // 关闭所有 HubStudio 浏览器
+  ipcMain.handle('browser:closeAllHubStudio', async () => {
+    try {
+      // 获取所有 HubStudio 类型的账号
+      const accounts = dbService.getAIStudioAccounts()
+      const hubStudioIds = accounts
+        .filter(a => a.browser_type === 'hubstudio')
+        .map(a => a.bit_browser_id)
+
+      if (hubStudioIds.length === 0) {
+        return { success: true, closed: 0, message: '没有 HubStudio 浏览器账号' }
+      }
+
+      const result = await hubStudioService.closeAllBrowsers(hubStudioIds)
+      return result
+    } catch (error) {
+      console.error('browser:closeAllHubStudio error:', error)
+      return { success: false, error: error.message }
     }
   })
 
