@@ -468,6 +468,13 @@ const TaskExecutionView = ({ taskId, onBack }) => {
     const [browserSelectModalVisible, setBrowserSelectModalVisible] = useState(false) // 浏览器选择弹窗
     const [tempSelectedProfiles, setTempSelectedProfiles] = useState([]) // 弹窗中的临时选择
     const [usageStats, setUsageStats] = useState({}) // 账号使用统计 { bit_browser_id: { daily_count, total_count } }
+    const [closeAfterFinish, setCloseAfterFinish] = useState(true) // 执行结束后关闭所有浏览器
+    const closeAfterFinishRef = React.useRef(closeAfterFinish) // 用于在回调中获取最新值
+
+    // 同步 ref 和 state
+    React.useEffect(() => {
+        closeAfterFinishRef.current = closeAfterFinish
+    }, [closeAfterFinish])
 
     // 显示结果弹窗
     const showResultModal = (content, isError = false) => {
@@ -594,6 +601,23 @@ const TaskExecutionView = ({ taskId, onBack }) => {
         } catch (e) { }
     }
 
+    // 关闭所有浏览器
+    const closeAllBrowsers = async () => {
+        try {
+            console.log('任务结束，正在关闭所有浏览器...')
+            const [bitResult, hubResult] = await Promise.all([
+                window.electron.browser.closeAllBitBrowser(),
+                window.electron.browser.closeAllHubStudio()
+            ])
+            const totalClosed = (bitResult.closed || 0) + (hubResult.closed || 0)
+            if (totalClosed > 0) {
+                message.info(`已关闭 ${totalClosed} 个浏览器`)
+            }
+        } catch (e) {
+            console.error('关闭浏览器失败:', e)
+        }
+    }
+
     // Progress Listener
     useEffect(() => {
         const handleProgress = (data) => {
@@ -613,7 +637,7 @@ const TaskExecutionView = ({ taskId, onBack }) => {
                 }
 
                 // Handle terminal states (整个任务完成)
-                if (data.type === 'task' && (data.status === 'completed' || data.status === 'error' || data.status === 'cancelled')) {
+                if (data.type === 'task' && (data.status === 'completed' || data.status === 'error' || data.status === 'cancelled' || data.status === 'rate_limited')) {
                     setProcessing(false)
                     setWorkerProgress({})
                     loadTaskAndItems()
@@ -624,6 +648,13 @@ const TaskExecutionView = ({ taskId, onBack }) => {
                         message.error('任务出错: ' + (data.error || data.message || '未知错误'))
                     } else if (data.status === 'cancelled') {
                         message.warning('任务已取消')
+                    } else if (data.status === 'rate_limited') {
+                        message.warning('所有浏览器账号已达今日使用上限')
+                    }
+
+                    // 任务结束后关闭所有浏览器
+                    if (closeAfterFinishRef.current) {
+                        closeAllBrowsers()
                     }
                 }
 
@@ -633,6 +664,11 @@ const TaskExecutionView = ({ taskId, onBack }) => {
                         setProcessing(false)
                         loadTaskAndItems()
                         message.success('任务完成')
+
+                        // 任务结束后关闭所有浏览器
+                        if (closeAfterFinishRef.current) {
+                            closeAllBrowsers()
+                        }
                     }
                 }
 
@@ -868,6 +904,12 @@ const TaskExecutionView = ({ taskId, onBack }) => {
                     <Popconfirm title="确定要强制重置状态吗？这会清除当前的执行状态。" onConfirm={handleForceReset}>
                         <Button type="text" danger size="small">状态卡住？点击重置</Button>
                     </Popconfirm>
+                    <Checkbox
+                        checked={closeAfterFinish}
+                        onChange={(e) => setCloseAfterFinish(e.target.checked)}
+                    >
+                        执行结束关闭所有浏览器
+                    </Checkbox>
                 </Space>
             </div>
 
