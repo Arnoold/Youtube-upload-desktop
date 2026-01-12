@@ -231,8 +231,9 @@ class AIStudioService {
    * @param {number} taskId - 任务 ID
    * @param {string} browserProfileId - BitBrowser 配置文件 ID
    * @param {Function} progressCallback - 进度回调
+   * @param {string} taskType - 任务类型 ('benchmark' | 'own_channel')
    */
-  async startTask(taskId, browserProfileId, progressCallback = () => { }) {
+  async startTask(taskId, browserProfileId, progressCallback = () => { }, taskType = 'benchmark') {
     if (this.isProcessing) {
       throw new Error('已有任务正在处理中')
     }
@@ -242,12 +243,15 @@ class AIStudioService {
 
     this.shouldStop = false
     this.isProcessing = true
-    this.currentTask = { type: 'persistent', id: taskId }
+    this.currentTask = { type: 'persistent', id: taskId, taskType }
 
     try {
       // 1. 获取任务项
-      console.log(`[AIStudio] Fetching items for task ${taskId}`)
-      const items = this.dbService.getCommentaryTaskItems(taskId)
+      console.log(`[AIStudio] Fetching items for task ${taskId} (type: ${taskType})`)
+      const items = taskType === 'own_channel'
+        ? this.dbService.getOwnChannelTaskItems(taskId)
+        : this.dbService.getCommentaryTaskItems(taskId)
+
       console.log(`[AIStudio] Retrieved ${items.length} items`)
       const pendingItems = items.filter(item => item.status === 'pending' || item.status === 'failed')
       const total = items.length
@@ -256,8 +260,13 @@ class AIStudioService {
       console.log(`[AIStudio] Starting task ${taskId}, total: ${total}, pending: ${pendingItems.length}`)
 
       // 更新任务状态和开始时间
-      this.dbService.updateCommentaryTaskStatus(taskId, 'processing')
-      this.dbService.updateCommentaryTaskStartTime(taskId)
+      if (taskType === 'own_channel') {
+        this.dbService.updateOwnChannelTaskStatus(taskId, 'processing')
+        this.dbService.updateOwnChannelTaskStartTime(taskId)
+      } else {
+        this.dbService.updateCommentaryTaskStatus(taskId, 'processing')
+        this.dbService.updateCommentaryTaskStartTime(taskId)
+      }
 
       for (let i = 0; i < pendingItems.length; i++) {
         if (this.shouldStop) {
@@ -280,10 +289,15 @@ class AIStudioService {
 
         try {
           // 更新单项状态
-          this.dbService.updateCommentaryTaskItemStatus(item.id, 'processing')
+          if (taskType === 'own_channel') {
+            this.dbService.updateOwnChannelTaskItemStatus(item.id, 'processing')
+          } else {
+            this.dbService.updateCommentaryTaskItemStatus(item.id, 'processing')
+          }
 
           // 执行处理
           console.log(`[AIStudio] Processing item ${item.id}, videoId: ${video.id}`)
+          const tableName = taskType === 'own_channel' ? 'own_videos' : null
           const result = await this.processVideo(video, browserProfileId, (progress) => {
             progressCallback({
               type: 'single',
@@ -292,11 +306,15 @@ class AIStudioService {
               current: processedCount + 1,
               total: total
             })
-          })
+          }, { tableName })
 
           // 更新成功状态 - 只保存实际的AI回复内容，而不是整个结果对象
           const responseToSave = result.response || result
-          this.dbService.updateCommentaryTaskItemStatus(item.id, 'completed', responseToSave)
+          if (taskType === 'own_channel') {
+            this.dbService.updateOwnChannelTaskItemStatus(item.id, 'completed', responseToSave)
+          } else {
+            this.dbService.updateCommentaryTaskItemStatus(item.id, 'completed', responseToSave)
+          }
           processedCount++
 
           // 记录成功次数
@@ -323,7 +341,11 @@ class AIStudioService {
           if (isRateLimitError) {
             // 速率限制：停止任务，保持当前项为 pending 状态
             console.log(`[AIStudio] Hit rate limit, stopping task`)
-            this.dbService.updateCommentaryTaskItemStatus(item.id, 'pending', null, null) // 重置为待处理
+            if (taskType === 'own_channel') {
+              this.dbService.updateOwnChannelTaskItemStatus(item.id, 'pending', null, null)
+            } else {
+              this.dbService.updateCommentaryTaskItemStatus(item.id, 'pending', null, null) // 重置为待处理
+            }
 
             progressCallback({
               type: 'task',
@@ -339,23 +361,44 @@ class AIStudioService {
 
           // 其他错误：正常处理
           const status = error.isVideoDeleted ? 'video_deleted' : 'failed'
-          this.dbService.updateCommentaryTaskItemStatus(item.id, status, null, error.message)
+          if (taskType === 'own_channel') {
+            this.dbService.updateOwnChannelTaskItemStatus(item.id, status, null, error.message)
+          } else {
+            this.dbService.updateCommentaryTaskItemStatus(item.id, status, null, error.message)
+          }
           processedCount++ // 即使失败也算处理过
         }
       }
 
       // 任务结束
       if (this.shouldStop) {
-        this.dbService.updateCommentaryTaskStatus(taskId, 'paused')
+        if (taskType === 'own_channel') {
+          this.dbService.updateOwnChannelTaskStatus(taskId, 'paused')
+        } else {
+          this.dbService.updateCommentaryTaskStatus(taskId, 'paused')
+        }
+        progressCallback({ type: 'task', taskId: taskId, status: 'cancelled', message: '任务已暂停' })
       } else {
-        this.dbService.updateCommentaryTaskStatus(taskId, 'completed')
-        this.dbService.updateCommentaryTaskFinishTime(taskId)
+        if (taskType === 'own_channel') {
+          this.dbService.updateOwnChannelTaskStatus(taskId, 'completed')
+          this.dbService.updateOwnChannelTaskEndTime(taskId)
+        } else {
+          this.dbService.updateCommentaryTaskStatus(taskId, 'completed')
+          this.dbService.updateCommentaryTaskFinishTime(taskId)
+        }
+        progressCallback({ type: 'task', taskId: taskId, status: 'completed', message: '任务已完成' })
       }
 
     } catch (error) {
       console.error('Task execution failed:', error)
-      this.dbService.updateCommentaryTaskStatus(taskId, 'error')
-      this.dbService.updateCommentaryTaskFinishTime(taskId)
+      if (taskType === 'own_channel') {
+        this.dbService.updateOwnChannelTaskStatus(taskId, 'error')
+        this.dbService.updateOwnChannelTaskEndTime(taskId)
+      } else {
+        this.dbService.updateCommentaryTaskStatus(taskId, 'error')
+        this.dbService.updateCommentaryTaskFinishTime(taskId)
+      }
+      progressCallback({ type: 'task', taskId: taskId, status: 'error', error: error.message, message: '任务执行失败: ' + error.message })
       throw error
     } finally {
       this.isProcessing = false
@@ -377,8 +420,17 @@ class AIStudioService {
    * @param {number} taskId - 任务 ID
    * @param {Array<string>} browserProfileIds - 多个 BitBrowser 配置文件 ID
    * @param {Function} progressCallback - 进度回调
+   * @param {string|object} taskTypeOrOptions - 任务类型 ('benchmark' | 'own_channel') 或配置对象
    */
-  async startParallelTask(taskId, browserProfileIds, progressCallback = () => { }) {
+  async startParallelTask(taskId, browserProfileIds, progressCallback = () => { }, taskTypeOrOptions = 'benchmark') {
+    // 兼容旧的调用方式和新的 options 对象
+    let taskType = 'benchmark'
+    if (typeof taskTypeOrOptions === 'string') {
+      taskType = taskTypeOrOptions
+    } else if (typeof taskTypeOrOptions === 'object') {
+      taskType = taskTypeOrOptions.taskType || 'benchmark'
+    }
+
     if (this.isProcessing) {
       throw new Error('已有任务正在处理中')
     }
@@ -392,13 +444,16 @@ class AIStudioService {
     this.shouldStop = false
     this.isProcessing = true
     this.taskId = taskId
-    this.currentTask = { type: 'parallel', id: taskId }
+    this.currentTask = { type: 'parallel', id: taskId, taskType }
     this.rateLimitedBrowsers.clear() // 清空速率限制记录
 
     try {
       // 1. 获取任务项
-      console.log(`[AIStudio] Fetching items for parallel task ${taskId}`)
-      const items = this.dbService.getCommentaryTaskItems(taskId)
+      console.log(`[AIStudio] Fetching items for parallel task ${taskId} (type: ${taskType})`)
+      const items = taskType === 'own_channel'
+        ? this.dbService.getOwnChannelTaskItems(taskId)
+        : this.dbService.getCommentaryTaskItems(taskId)
+
       const pendingItems = items.filter(item => item.status === 'pending' || item.status === 'failed')
       const total = items.length
       let completedCount = items.length - pendingItems.length
@@ -406,8 +461,13 @@ class AIStudioService {
       console.log(`[AIStudio] Starting parallel task ${taskId}, total: ${total}, pending: ${pendingItems.length}, workers: ${browserProfileIds.length}`)
 
       // 更新任务状态和开始时间
-      this.dbService.updateCommentaryTaskStatus(taskId, 'processing')
-      this.dbService.updateCommentaryTaskStartTime(taskId)
+      if (taskType === 'own_channel') {
+        this.dbService.updateOwnChannelTaskStatus(taskId, 'processing')
+        this.dbService.updateOwnChannelTaskStartTime(taskId)
+      } else {
+        this.dbService.updateCommentaryTaskStatus(taskId, 'processing')
+        this.dbService.updateCommentaryTaskStartTime(taskId)
+      }
 
       // 2. 初始化任务队列
       this.taskQueue = [...pendingItems]
@@ -415,7 +475,7 @@ class AIStudioService {
       // 3. 创建工作线程
       const workerPromises = browserProfileIds.map((profileId, index) => {
         const workerId = `worker-${index}-${profileId}`
-        return this.runWorker(workerId, profileId, taskId, total, () => completedCount, (delta) => { completedCount += delta }, progressCallback)
+        return this.runWorker(workerId, profileId, taskId, total, () => completedCount, (delta) => { completedCount += delta }, progressCallback, taskType)
       })
 
       // 4. 等待所有工作线程完成
@@ -423,7 +483,12 @@ class AIStudioService {
 
       // 5. 任务结束
       if (this.shouldStop) {
-        this.dbService.updateCommentaryTaskStatus(taskId, 'paused')
+        // 用户手动停止了任务
+        if (taskType === 'own_channel') {
+          this.dbService.updateOwnChannelTaskStatus(taskId, 'paused')
+        } else {
+          this.dbService.updateCommentaryTaskStatus(taskId, 'paused')
+        }
         progressCallback({
           type: 'task',
           taskId: taskId,
@@ -431,8 +496,14 @@ class AIStudioService {
           message: '任务已暂停'
         })
       } else {
-        this.dbService.updateCommentaryTaskStatus(taskId, 'completed')
-        this.dbService.updateCommentaryTaskFinishTime(taskId)
+        // 任务正常完成
+        if (taskType === 'own_channel') {
+          this.dbService.updateOwnChannelTaskStatus(taskId, 'completed')
+          this.dbService.updateOwnChannelTaskEndTime(taskId)
+        } else {
+          this.dbService.updateCommentaryTaskStatus(taskId, 'completed')
+          this.dbService.updateCommentaryTaskFinishTime(taskId)
+        }
         progressCallback({
           type: 'task',
           taskId: taskId,
@@ -443,8 +514,13 @@ class AIStudioService {
 
     } catch (error) {
       console.error('Parallel task execution failed:', error)
-      this.dbService.updateCommentaryTaskStatus(taskId, 'error')
-      this.dbService.updateCommentaryTaskFinishTime(taskId)
+      if (taskType === 'own_channel') {
+        this.dbService.updateOwnChannelTaskStatus(taskId, 'error')
+        this.dbService.updateOwnChannelTaskEndTime(taskId)
+      } else {
+        this.dbService.updateCommentaryTaskStatus(taskId, 'error')
+        this.dbService.updateCommentaryTaskFinishTime(taskId)
+      }
       progressCallback({
         type: 'task',
         taskId: taskId,
@@ -467,8 +543,8 @@ class AIStudioService {
   /**
    * 单个工作线程的执行逻辑
    */
-  async runWorker(workerId, browserProfileId, taskId, total, getCompleted, addCompleted, progressCallback) {
-    console.log(`[AIStudio] Worker ${workerId} started with profile ${browserProfileId}`)
+  async runWorker(workerId, browserProfileId, taskId, total, getCompleted, addCompleted, progressCallback, taskType = 'benchmark') {
+    console.log(`[AIStudio] Worker ${workerId} started with profile ${browserProfileId} (taskType: ${taskType})`)
 
     this.activeWorkers.set(workerId, {
       browserProfileId,
@@ -502,10 +578,15 @@ class AIStudioService {
 
         try {
           // 更新单项状态
-          this.dbService.updateCommentaryTaskItemStatus(item.id, 'processing')
+          if (taskType === 'own_channel') {
+            this.dbService.updateOwnChannelTaskItemStatus(item.id, 'processing')
+          } else {
+            this.dbService.updateCommentaryTaskItemStatus(item.id, 'processing')
+          }
 
           // 执行处理
           console.log(`[AIStudio] Worker ${workerId} processing item ${item.id}, videoId: ${video.id}`)
+          const tableName = taskType === 'own_channel' ? 'own_videos' : null
           const result = await this.processVideoForWorker(video, browserProfileId, workerId, (progress) => {
             progressCallback({
               type: 'single',
@@ -515,11 +596,15 @@ class AIStudioService {
               current: getCompleted() + 1,
               total: total
             })
-          })
+          }, {}, { tableName })
 
           // 更新成功状态
           const responseToSave = result.response || result
-          this.dbService.updateCommentaryTaskItemStatus(item.id, 'completed', responseToSave)
+          if (taskType === 'own_channel') {
+            this.dbService.updateOwnChannelTaskItemStatus(item.id, 'completed', responseToSave)
+          } else {
+            this.dbService.updateCommentaryTaskItemStatus(item.id, 'completed', responseToSave)
+          }
           addCompleted(1)
 
           // 记录成功次数
@@ -558,7 +643,11 @@ class AIStudioService {
           if (isRateLimitError) {
             // 速率限制：将当前项放回队列头部，供其他 worker 处理
             console.log(`[AIStudio] Worker ${workerId} hit rate limit, putting item back to queue and stopping`)
-            this.dbService.updateCommentaryTaskItemStatus(item.id, 'pending', null, null) // 重置为待处理
+            if (taskType === 'own_channel') {
+              this.dbService.updateOwnChannelTaskItemStatus(item.id, 'pending', null, null)
+            } else {
+              this.dbService.updateCommentaryTaskItemStatus(item.id, 'pending', null, null) // 重置为待处理
+            }
             this.taskQueue.unshift(item) // 放回队列头部
 
             // 标记此浏览器已达限制
@@ -592,7 +681,11 @@ class AIStudioService {
           // 其他错误：正常处理
           const status = error.isVideoDeleted ? 'video_deleted' : 'failed'
           const statusText = error.isVideoDeleted ? '视频已删除' : '失败'
-          this.dbService.updateCommentaryTaskItemStatus(item.id, status, null, error.message)
+          if (taskType === 'own_channel') {
+            this.dbService.updateOwnChannelTaskItemStatus(item.id, status, null, error.message)
+          } else {
+            this.dbService.updateCommentaryTaskItemStatus(item.id, status, null, error.message)
+          }
           addCompleted(1)
 
           progressCallback({
@@ -619,8 +712,14 @@ class AIStudioService {
 
   /**
    * 为工作线程处理单个视频 (独立的浏览器实例)
+   * @param {Object} video - 视频记录
+   * @param {string} browserProfileId - 浏览器配置文件 ID
+   * @param {string} workerId - 工作线程 ID
+   * @param {Function} progressCallback - 进度回调
+   * @param {Object} extraOptions - 额外选项（兼容旧调用）
+   * @param {Object} options - 配置选项，包含 tableName 等
    */
-  async processVideoForWorker(video, browserProfileId, workerId, progressCallback = () => { }) {
+  async processVideoForWorker(video, browserProfileId, workerId, progressCallback = () => { }, extraOptions = {}, options = {}) {
     let browserId = null
     let playwrightBrowserId = null
     let browserService = null
@@ -629,7 +728,7 @@ class AIStudioService {
     try {
       // Step 1: 更新状态为 generating
       progressCallback({ step: 1, progress: 5, message: '更新任务状态...' })
-      await supabaseService.updateStatus(video.id, 'generating')
+      await supabaseService.updateStatus(video.id, 'generating', null, { tableName: options.tableName })
 
       // Step 2: 获取账号信息并启动对应浏览器
       progressCallback({ step: 2, progress: 10, message: '启动浏览器...' })
@@ -667,12 +766,6 @@ class AIStudioService {
 
       const existingPages = context.pages()
       let page = existingPages.length > 0 ? existingPages[0] : await context.newPage()
-
-      try {
-        await page.bringToFront()
-      } catch (e) {
-        console.error(`[${workerId}] Failed to bring page to front:`, e)
-      }
 
       await page.goto('https://aistudio.google.com/prompts/new_chat', {
         waitUntil: 'domcontentloaded',
@@ -729,7 +822,7 @@ class AIStudioService {
       await page.keyboard.press('Backspace')
       await page.waitForTimeout(500)
 
-      const videoUrl = video.video_url || video.url
+      const videoUrl = video.video_url || video.url || (video.video_id ? `https://www.youtube.com/watch?v=${video.video_id}` : null)
 
       if (!videoUrl) {
         throw new Error('视频链接为空')
@@ -1241,7 +1334,7 @@ class AIStudioService {
 
       // 保存到 Supabase
       progressCallback({ step: 9, progress: 95, message: '保存结果...' })
-      await supabaseService.updateAIResponse(video.id, parsedResponse, 'completed')
+      await supabaseService.updateAIResponse(video.id, parsedResponse, 'completed', options.tableName)
 
       progressCallback({ step: 10, progress: 100, message: '处理完成！' })
 
@@ -1255,7 +1348,7 @@ class AIStudioService {
       console.error(`[${workerId}] Process video failed:`, error)
 
       try {
-        await supabaseService.updateStatus(video.id, 'failed', error.message)
+        await supabaseService.updateStatus(video.id, 'failed', error.message, { tableName: options.tableName })
       } catch (e) {
         console.error('Failed to update status:', e)
       }
@@ -1286,8 +1379,9 @@ class AIStudioService {
    * @param {Object} video - 视频记录 { id, video_url, prompt }
    * @param {string} browserProfileId - 浏览器配置文件 ID
    * @param {Function} progressCallback - 进度回调
+   * @param {Object} options - 配置选项，包含 tableName 等
    */
-  async processVideo(video, browserProfileId, progressCallback = () => { }) {
+  async processVideo(video, browserProfileId, progressCallback = () => { }, options = {}) {
     if (this.isProcessing && (!this.currentTask || this.currentTask.type !== 'persistent')) {
       // 如果是持久化任务调用 processVideo，不应该抛出错误，因为 isProcessing 已经被置为 true
       // 这里需要区分是外部直接调用 processVideo 还是 startTask 内部调用
@@ -1319,7 +1413,7 @@ class AIStudioService {
     try {
       // Step 1: 更新状态为 generating
       progressCallback({ step: 1, progress: 5, message: '更新任务状态...' })
-      await supabaseService.updateStatus(video.id, 'generating')
+      await supabaseService.updateStatus(video.id, 'generating', null, { tableName: options.tableName })
 
       // Step 2: 获取账号信息并启动对应浏览器
       progressCallback({ step: 2, progress: 10, message: '启动浏览器...' })
@@ -1360,13 +1454,6 @@ class AIStudioService {
       } else {
         console.log('[AIStudio] No existing pages, creating new one...')
         page = await context.newPage()
-      }
-
-      // 确保页面置顶
-      try {
-        await page.bringToFront()
-      } catch (e) {
-        console.error('[AIStudio] Failed to bring page to front:', e)
       }
 
       console.log('[AIStudio] Navigating to:', 'https://aistudio.google.com/prompts/new_chat')
@@ -1434,12 +1521,13 @@ class AIStudioService {
       await page.waitForTimeout(500)
 
       // 3.2 粘贴视频链接 (使用剪贴板锁保护)
-      const videoUrl = video.video_url || video.url
+      // 优先使用 video_url，其次 url，最后根据 video_id 构建
+      const videoUrl = video.video_url || video.url || (video.video_id ? `https://www.youtube.com/watch?v=${video.video_id}` : null)
       console.log('[AIStudio] Video object:', JSON.stringify(video))
       console.log('[AIStudio] Pasting URL:', videoUrl)
 
       if (!videoUrl) {
-        throw new Error('视频链接为空')
+        throw new Error('视频链接为空，且无法通过 video_id 构建')
       }
 
       // 使用剪贴板锁保护粘贴操作，避免多浏览器并行时冲突
@@ -1879,7 +1967,7 @@ class AIStudioService {
       console.log('[AIStudio] Saving response to Supabase...')
       console.log('[AIStudio] Response preview:', cleanResponse.substring(0, 200) + '...')
 
-      await supabaseService.updateAIResponse(video.id, parsedResponse, 'completed')
+      await supabaseService.updateAIResponse(video.id, parsedResponse, 'completed', options.tableName)
 
       progressCallback({ step: 10, progress: 100, message: '处理完成！' })
 
@@ -1910,7 +1998,7 @@ class AIStudioService {
 
       // 更新状态为失败
       try {
-        await supabaseService.updateStatus(video.id, 'failed', error.message)
+        await supabaseService.updateStatus(video.id, 'failed', error.message, { tableName: options.tableName })
       } catch (e) {
         console.error('Failed to update status:', e)
       }

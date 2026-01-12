@@ -79,7 +79,17 @@ contextBridge.exposeInMainWorld('electron', {
     getCommentaryTaskById: (id) => ipcRenderer.invoke('db:get-commentary-task-by-id', id),
     getCommentaryTaskItems: (taskId) => ipcRenderer.invoke('db:get-commentary-task-items', taskId),
     getCommentaryTaskStats: (taskId) => ipcRenderer.invoke('db:get-commentary-task-stats', taskId),
+    getCommentaryTaskStats: (taskId) => ipcRenderer.invoke('db:get-commentary-task-stats', taskId),
     deleteCommentaryTask: (id) => ipcRenderer.invoke('db:delete-commentary-task', id),
+
+    // 自有频道任务
+    createOwnChannelTask: (task) => ipcRenderer.invoke('db:create-own-channel-task', task),
+    getOwnChannelTasks: () => ipcRenderer.invoke('db:get-own-channel-tasks'),
+    getOwnChannelTasksWithStats: () => ipcRenderer.invoke('db:get-own-channel-tasks-with-stats'),
+    getOwnChannelTaskById: (id) => ipcRenderer.invoke('db:get-own-channel-task-by-id', id),
+    getOwnChannelTaskItems: (taskId) => ipcRenderer.invoke('db:get-own-channel-task-items', taskId),
+    getOwnChannelTaskStats: (taskId) => ipcRenderer.invoke('db:get-own-channel-task-stats', taskId),
+    deleteOwnChannelTask: (id) => ipcRenderer.invoke('db:delete-own-channel-task', id),
 
     getSetting: (key) => ipcRenderer.invoke('db:get-setting', key),
     setSetting: (key, value) => ipcRenderer.invoke('db:set-setting', key, value)
@@ -111,7 +121,7 @@ contextBridge.exposeInMainWorld('electron', {
     getPrompt: () => ipcRenderer.invoke('aistudio:get-prompt'),
     process: (video, browserProfileId) => ipcRenderer.invoke('aistudio:process', video, browserProfileId),
     batchProcess: (videos, browserProfileId) => ipcRenderer.invoke('aistudio:batch-process', videos, browserProfileId),
-    startTask: (taskId, browserProfileId) => ipcRenderer.invoke('aistudio:start-task', taskId, browserProfileId),
+    startTask: (taskId, browserProfileId, taskType) => ipcRenderer.invoke('aistudio:start-task', taskId, browserProfileId, taskType),
     stopTask: () => ipcRenderer.invoke('aistudio:stop-task'),
     getStatus: () => ipcRenderer.invoke('aistudio:status'),
     cancel: () => ipcRenderer.invoke('aistudio:cancel'),
@@ -198,6 +208,34 @@ contextBridge.exposeInMainWorld('electron', {
     // 监听日志
     onLog: (callback) => {
       ipcRenderer.on('scheduler:log', (event, data) => callback(data))
+    },
+
+    // 移除监听器
+    removeListener: (channel) => {
+      ipcRenderer.removeAllListeners(channel)
+    }
+  },
+
+  // 自有频道定时任务
+  ownChannelScheduler: {
+    getConfig: () => ipcRenderer.invoke('own-channel-scheduler:getConfig'),
+    updateConfig: (config) => ipcRenderer.invoke('own-channel-scheduler:updateConfig', config),
+    enable: () => ipcRenderer.invoke('own-channel-scheduler:enable'),
+    disable: () => ipcRenderer.invoke('own-channel-scheduler:disable'),
+    executeNow: () => ipcRenderer.invoke('own-channel-scheduler:executeNow'),
+    getLogs: (limit) => ipcRenderer.invoke('own-channel-scheduler:getLogs', limit),
+    clearLogs: () => ipcRenderer.invoke('own-channel-scheduler:clearLogs'),
+    getStatus: () => ipcRenderer.invoke('own-channel-scheduler:getStatus'),
+    openBrowsers: (browserIds) => ipcRenderer.invoke('own-channel-scheduler:openBrowsers', browserIds),
+
+    // 监听定时任务状态
+    onStatus: (callback) => {
+      ipcRenderer.on('own-channel-scheduler:status', (event, data) => callback(data))
+    },
+
+    // 监听日志
+    onLog: (callback) => {
+      ipcRenderer.on('own-channel-scheduler:log', (event, data) => callback(data))
     },
 
     // 移除监听器

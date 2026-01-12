@@ -379,6 +379,81 @@ function setupIPC(mainWindow, services) {
     }
   })
 
+  // ===== 自有频道任务 IPC =====
+
+  ipcMain.handle('db:create-own-channel-task', async (event, task) => {
+    try {
+      const taskId = dbService.createOwnChannelTask(task)
+      if (task.items && task.items.length > 0) {
+        // 复用 addCommentaryTaskItems 逻辑，但需要确认是否需要独立的方法
+        // DatabaseService 中我们添加了 addOwnChannelTaskItem，但没有批量添加的方法
+        // 我们需要循环调用或者在 DatabaseService 中添加批量方法
+        // 为了简单，这里循环调用
+        for (const item of task.items) {
+          dbService.addOwnChannelTaskItem(taskId, item.video_id, item.video_info)
+        }
+      }
+      return taskId
+    } catch (error) {
+      console.error('db:create-own-channel-task error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('db:get-own-channel-tasks', async () => {
+    try {
+      return dbService.getOwnChannelTasks()
+    } catch (error) {
+      console.error('db:get-own-channel-tasks error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('db:get-own-channel-tasks-with-stats', async () => {
+    try {
+      return dbService.getOwnChannelTasksWithStats()
+    } catch (error) {
+      console.error('db:get-own-channel-tasks-with-stats error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('db:get-own-channel-task-items', async (event, taskId) => {
+    try {
+      return dbService.getOwnChannelTaskItems(taskId)
+    } catch (error) {
+      console.error('db:get-own-channel-task-items error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('db:get-own-channel-task-by-id', async (event, id) => {
+    try {
+      return dbService.getOwnChannelTaskById(id)
+    } catch (error) {
+      console.error('db:get-own-channel-task-by-id error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('db:get-own-channel-task-stats', async (event, taskId) => {
+    try {
+      return dbService.getOwnChannelTaskStats(taskId)
+    } catch (error) {
+      console.error('db:get-own-channel-task-stats error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('db:delete-own-channel-task', async (event, id) => {
+    try {
+      return dbService.deleteOwnChannelTask(id)
+    } catch (error) {
+      console.error('db:delete-own-channel-task error:', error)
+      throw error
+    }
+  })
+
   ipcMain.handle('db:get-setting', async (event, key) => {
     try {
       return dbService.getSetting(key)
@@ -521,6 +596,24 @@ function setupIPC(mainWindow, services) {
     }
   })
 
+  ipcMain.handle('supabase:search-own-channels', async (event, keyword, limit) => {
+    try {
+      return await supabaseService.searchOwnChannels(keyword, limit)
+    } catch (error) {
+      console.error('supabase:search-own-channels error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('supabase:get-own-channel-groups', async () => {
+    try {
+      return await supabaseService.getOwnChannelGroups()
+    } catch (error) {
+      console.error('supabase:get-own-channel-groups error:', error)
+      throw error
+    }
+  })
+
   ipcMain.handle('supabase:disconnect', async () => {
     try {
       supabaseService.disconnect()
@@ -563,7 +656,7 @@ function setupIPC(mainWindow, services) {
     }
   })
 
-  ipcMain.handle('aistudio:start-task', async (event, taskId, browserProfileIds) => {
+  ipcMain.handle('aistudio:start-task', async (event, taskId, browserProfileIds, taskType = 'benchmark') => {
     try {
       // 支持多浏览器并行执行
       // browserProfileIds 可以是单个字符串或数组
@@ -574,7 +667,7 @@ function setupIPC(mainWindow, services) {
         // 多浏览器并行模式
         aiStudioService.startParallelTask(taskId, profileIds, (progress) => {
           mainWindow.webContents.send('aistudio:progress', progress)
-        }).catch(err => {
+        }, taskType).catch(err => {
           console.error('Async parallel task error:', err)
           mainWindow.webContents.send('aistudio:progress', {
             taskId,
@@ -587,7 +680,7 @@ function setupIPC(mainWindow, services) {
         // 单浏览器模式（兼容旧逻辑）
         aiStudioService.startTask(taskId, profileIds[0], (progress) => {
           mainWindow.webContents.send('aistudio:progress', progress)
-        }).catch(err => {
+        }, taskType).catch(err => {
           console.error('Async task error:', err)
           mainWindow.webContents.send('aistudio:progress', { status: 'error', error: err.message })
         })
@@ -715,13 +808,6 @@ function setupIPC(mainWindow, services) {
           // 等待页面稳定
           await page.waitForTimeout(2000)
         }
-      }
-
-      // 确保页面置顶
-      try {
-        await page.bringToFront()
-      } catch (e) {
-        console.error('Failed to bring page to front:', e)
       }
 
       // 导航到 AI Studio
@@ -1416,6 +1502,151 @@ function setupIPC(mainWindow, services) {
         })
       } catch (error) {
         // 获取账号名称用于显示
+        let accountName = browserId
+        try {
+          const account = dbService.getAIStudioAccountByBrowserId(browserId)
+          if (account) accountName = account.name
+        } catch (e) { }
+
+        results.push({
+          browserId,
+          name: accountName,
+          success: false,
+          error: error.message
+        })
+      }
+    }
+
+    return results
+  })
+
+  // ===== 自有频道定时任务相关 =====
+  const ownChannelSchedulerService = require('./services/own-channel-scheduler.service')
+
+  ipcMain.handle('own-channel-scheduler:getConfig', async () => {
+    try {
+      return ownChannelSchedulerService.getConfig()
+    } catch (error) {
+      console.error('own-channel-scheduler:getConfig error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('own-channel-scheduler:updateConfig', async (event, config) => {
+    try {
+      return await ownChannelSchedulerService.updateConfig(config)
+    } catch (error) {
+      console.error('own-channel-scheduler:updateConfig error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('own-channel-scheduler:enable', async () => {
+    try {
+      return await ownChannelSchedulerService.enable()
+    } catch (error) {
+      console.error('own-channel-scheduler:enable error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('own-channel-scheduler:disable', async () => {
+    try {
+      return await ownChannelSchedulerService.disable()
+    } catch (error) {
+      console.error('own-channel-scheduler:disable error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('own-channel-scheduler:executeNow', async () => {
+    try {
+      return await ownChannelSchedulerService.executeNow()
+    } catch (error) {
+      console.error('own-channel-scheduler:executeNow error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('own-channel-scheduler:getLogs', async (event, limit) => {
+    try {
+      return ownChannelSchedulerService.getLogs(limit)
+    } catch (error) {
+      console.error('own-channel-scheduler:getLogs error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('own-channel-scheduler:clearLogs', async () => {
+    try {
+      return await ownChannelSchedulerService.clearLogs()
+    } catch (error) {
+      console.error('own-channel-scheduler:clearLogs error:', error)
+      throw error
+    }
+  })
+
+  ipcMain.handle('own-channel-scheduler:getStatus', async () => {
+    try {
+      return ownChannelSchedulerService.getStatus()
+    } catch (error) {
+      console.error('own-channel-scheduler:getStatus error:', error)
+      throw error
+    }
+  })
+
+  // 批量打开浏览器（自有频道定时任务使用，复用逻辑）
+  ipcMain.handle('own-channel-scheduler:openBrowsers', async (event, browserIds) => {
+    const { chromium } = require('playwright-core')
+    const results = []
+    const AI_STUDIO_URL = 'https://aistudio.google.com/prompts/new_chat'
+
+    for (const browserId of browserIds) {
+      try {
+        // 获取账号信息以确定浏览器类型
+        const account = dbService.getAIStudioAccountByBrowserId(browserId)
+        if (!account) {
+          results.push({
+            browserId,
+            success: false,
+            error: `未找到浏览器账号: ${browserId}`
+          })
+          continue
+        }
+
+        const browserType = account.browser_type || 'bitbrowser'
+        let browserService
+
+        if (browserType === 'hubstudio') {
+          browserService = hubStudioService
+        } else {
+          browserService = bitBrowserService
+        }
+
+        // 启动浏览器
+        const result = await browserService.startBrowser(browserId)
+
+        // 如果启动成功且有 wsEndpoint，打开 AI Studio 页面
+        if (result.success !== false && result.wsEndpoint) {
+          try {
+            const browser = await chromium.connectOverCDP(result.wsEndpoint)
+            const context = browser.contexts()[0]
+            const page = await context.newPage()
+            await page.goto(AI_STUDIO_URL, { waitUntil: 'domcontentloaded', timeout: 30000 })
+            // 断开连接但不关闭浏览器
+            await browser.close()
+          } catch (pageError) {
+            console.error(`Failed to open AI Studio page for ${browserId}:`, pageError.message)
+          }
+        }
+
+        results.push({
+          browserId,
+          name: account.name,
+          success: true,
+          result
+        })
+      } catch (error) {
         let accountName = browserId
         try {
           const account = dbService.getAIStudioAccountByBrowserId(browserId)

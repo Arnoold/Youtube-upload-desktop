@@ -223,6 +223,17 @@ app.whenReady().then(async () => {
       log(`app.whenReady: Scheduler init error: ${error.message}`)
       console.error('Scheduler initialization error:', error)
     }
+
+    // 初始化自有频道定时任务服务
+    log('app.whenReady: Initializing own-channel scheduler service...')
+    try {
+      const ownChannelSchedulerService = require('./services/own-channel-scheduler.service')
+      ownChannelSchedulerService.init(services, mainWindow)
+      log('app.whenReady: Own-channel scheduler service initialized.')
+    } catch (error) {
+      log(`app.whenReady: Own-channel scheduler init error: ${error.message}`)
+      console.error('Own-channel scheduler initialization error:', error)
+    }
   } else {
     log('app.whenReady: mainWindow is null!')
   }

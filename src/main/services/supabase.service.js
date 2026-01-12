@@ -127,6 +127,7 @@ class SupabaseService {
    * @param {boolean} options.channelIsActive - 频道是否启用筛选
    * @param {string} options.sortBy - 排序字段 (id, published_at, view_count, created_at)
    * @param {string} options.sortOrder - 排序方向 (asc, desc)
+   * @param {string} options.tableName - 表名 (可选，默认为配置的表名)
    */
   async getVideos(options = {}) {
     if (!this.client) {
@@ -136,15 +137,38 @@ class SupabaseService {
     // 最小化字段，避免查询超时
     // 只选择列表展示需要的字段，避免查询过慢
     // 注意：不要包含 script_text 等大字段，会导致查询超时
-    let selectFields = options.select || [
-      'id', 'video_id', 'channel_id', 'title',
-      'channel_name', 'channel_avatar', 'published_at', 'duration',
-      'thumbnail', 'url', 'view_count', 'like_count', 'comment_count',
-      'group_name', 'tags', 'generation_status', 'script_generated_at',
-      'script_generation_error', 'created_at', 'updated_at',
-      // 只包含小字段用于预览
-      'video_description'
-    ].join(',')
+    const tableName = options.tableName || this.config.tableName
+    const isOwnChannel = tableName === 'own_videos' || tableName === 'own_channel_videos'
+
+    // 最小化字段，避免查询超时
+    // 只选择列表展示需要的字段，避免查询过慢
+    // 注意：不要包含 script_text 等大字段，会导致查询超时
+    let selectFields = options.select
+
+    if (!selectFields) {
+      if (isOwnChannel) {
+        // 自有频道表字段 (不包含 channel_name, group_name)
+        selectFields = [
+          'id', 'video_id', 'channel_id', 'title',
+          'description', // 对应 video_description
+          'thumbnail', 'duration', 'published_at',
+          'view_count', 'like_count', 'comment_count',
+          'tags',
+          'created_at', 'updated_at'
+        ].join(',')
+      } else {
+        // 对标视频表字段
+        selectFields = [
+          'id', 'video_id', 'channel_id', 'title',
+          'channel_name', 'channel_avatar', 'published_at', 'duration',
+          'thumbnail', 'url', 'view_count', 'like_count', 'comment_count',
+          'group_name', 'tags', 'generation_status', 'script_generated_at',
+          'script_generation_error', 'created_at', 'updated_at',
+          // 只包含小字段用于预览
+          'video_description'
+        ].join(',')
+      }
+    }
 
     // 如果需要脚本内容，添加更多字段
     if (options.includeScript && !options.select) {
@@ -183,19 +207,36 @@ class SupabaseService {
       }
     }
 
+    // const tableName = options.tableName || this.config.tableName // Moved up
     let query = this.client
-      .from(this.config.tableName)
+      .from(tableName)
       .select(selectFields, { count: 'exact' })
 
     // 生成状态筛选（支持多选）
     if (options.statusList && options.statusList.length > 0) {
       // 多选模式
-      const statusValues = options.statusList.map(s => s === 'pending_all' ? 'pending' : s)
-      query = query.in('generation_status', statusValues)
+      const hasPendingAll = options.statusList.includes('pending_all')
+      if (hasPendingAll) {
+        // pending_all 表示同时查询 null 和 pending 两种状态
+        const otherStatuses = options.statusList.filter(s => s !== 'pending_all')
+        if (otherStatuses.length > 0) {
+          // 有其他状态，使用 or 条件组合
+          const orConditions = ['generation_status.is.null', 'generation_status.eq.pending']
+          otherStatuses.forEach(s => orConditions.push(`generation_status.eq.${s}`))
+          query = query.or(orConditions.join(','))
+        } else {
+          // 只有 pending_all，查询 null 和 pending
+          query = query.or('generation_status.is.null,generation_status.eq.pending')
+        }
+      } else {
+        const statusValues = options.statusList
+        query = query.in('generation_status', statusValues)
+      }
     } else if (options.status) {
       // 兼容旧的单选模式
       if (options.status === 'pending_all' || options.status === 'null') {
-        query = query.eq('generation_status', 'pending')
+        // pending_all 表示同时查询 null 和 pending 两种状态
+        query = query.or('generation_status.is.null,generation_status.eq.pending')
       } else if (options.status !== 'all') {
         query = query.eq('generation_status', options.status)
       }
@@ -332,6 +373,78 @@ class SupabaseService {
   }
 
   /**
+   * 搜索自有频道列表 (用于筛选)
+   * 从 own_channels 表搜索频道数据
+   * @param {string} keyword - 搜索关键词（频道名称或频道ID模糊匹配）
+   * @param {number} limit - 返回数量限制，默认20
+   */
+  async searchOwnChannels(keyword = '', limit = 20) {
+    if (!this.client) {
+      throw new Error('未初始化 Supabase 客户端')
+    }
+
+    let query = this.client
+      .from('own_channels')
+      .select('channel_id, channel_name')
+
+    // 如果有关键词，同时搜索 channel_name 和 channel_id
+    if (keyword && keyword.trim()) {
+      const searchTerm = keyword.trim()
+      // 使用 or 条件同时匹配频道名称和频道ID
+      query = query.or(`channel_name.ilike.%${searchTerm}%,channel_id.ilike.%${searchTerm}%`)
+    }
+
+    query = query
+      .order('channel_name', { ascending: true })
+      .limit(limit)
+
+    const { data, error } = await query
+
+    if (error) {
+      throw new Error(error.message)
+    }
+
+    // 转换为下拉选项格式
+    return (data || []).map(item => ({
+      value: item.channel_id,
+      label: item.channel_name || item.channel_id
+    }))
+  }
+
+  /**
+   * 获取所有自有频道分组列表 (用于筛选)
+   * 从 own_channels 表获取分组数据 (去重)
+   */
+  async getOwnChannelGroups() {
+    if (!this.client) {
+      throw new Error('未初始化 Supabase 客户端')
+    }
+
+    // 获取所有不为空的分组名，并去重
+    const { data, error } = await this.client
+      .from('own_channels')
+      .select('group_name')
+      .not('group_name', 'is', null)
+      .neq('group_name', '')
+
+    if (error) {
+      throw new Error(error.message)
+    }
+
+    // 去重
+    const uniqueGroups = [...new Set((data || []).map(item => item.group_name))]
+
+    // 排序
+    uniqueGroups.sort()
+
+    // 转换为下拉选项格式
+    return uniqueGroups.map(group => ({
+      value: group,
+      label: group
+    }))
+  }
+
+  /**
    * 获取所有分组列表 (用于筛选)
    * 从 benchmark_channel_groups 表获取分组数据
    */
@@ -386,11 +499,14 @@ class SupabaseService {
    * @param {string} id - 视频 ID
    * @param {string|Object} aiResponse - AI 回复内容 (JSON 字符串或对象)
    * @param {string} status - 生成状态
+   * @param {string} tableName - 表名 (可选)
    */
-  async updateAIResponse(id, aiResponse, status = 'completed') {
+  async updateAIResponse(id, aiResponse, status = 'completed', tableName = null) {
     if (!this.client) {
       throw new Error('未初始化 Supabase 客户端')
     }
+
+    const targetTable = tableName || this.config.tableName
 
     let updateData = {
       generation_status: status,
@@ -460,7 +576,7 @@ class SupabaseService {
     }
 
     const { data, error } = await this.client
-      .from(this.config.tableName)
+      .from(targetTable)
       .update(updateData)
       .eq('id', id)
       .select()
@@ -473,9 +589,12 @@ class SupabaseService {
   }
 
   /**
-   * 更新视频状态
+   * @param {string} id - 视频 ID
+   * @param {string} status - 新状态
+   * @param {string} errorMessage - 错误信息
+   * @param {Object} options - 额外选项，如 tableName
    */
-  async updateStatus(id, status, errorMessage = null) {
+  async updateStatus(id, status, errorMessage = null, options = {}) {
     if (!this.client) {
       throw new Error('未初始化 Supabase 客户端')
     }
@@ -485,8 +604,9 @@ class SupabaseService {
       updateData.script_generation_error = errorMessage
     }
 
+    const targetTable = options && options.tableName ? options.tableName : this.config.tableName
     const { data, error } = await this.client
-      .from(this.config.tableName)
+      .from(targetTable)
       .update(updateData)
       .eq('id', id)
       .select()

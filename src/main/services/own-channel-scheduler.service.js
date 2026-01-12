@@ -1,15 +1,15 @@
 /**
- * 定时任务服务
- * 用于定时执行解说词获取任务
+ * 自有频道定时任务服务
+ * 用于定时执行自有频道解说词获取任务
  */
 
-class SchedulerService {
+class OwnChannelSchedulerService {
   constructor() {
     this.checkInterval = null
     this.isRunning = false
     this.config = {
       enabled: false,
-      executeTime: '08:00',
+      executeTime: '09:00', // 默认09:00，与对标频道08:00错开
       daysBack: 3,
       daysForward: 1,
       minViews: 10, // 万
@@ -32,7 +32,7 @@ class SchedulerService {
     this.mainWindow = mainWindow
     this.loadConfig()
     this.startChecker()
-    console.log('[Scheduler] 服务已初始化')
+    console.log('[OwnChannelScheduler] 服务已初始化')
   }
 
   /**
@@ -41,17 +41,17 @@ class SchedulerService {
   async loadConfig() {
     try {
       const { dbService } = this.services
-      const savedConfig = await dbService.getSetting('scheduler_config')
+      const savedConfig = await dbService.getSetting('own_channel_scheduler_config')
       if (savedConfig) {
         this.config = { ...this.config, ...JSON.parse(savedConfig) }
       }
-      const savedLogs = await dbService.getSetting('scheduler_logs')
+      const savedLogs = await dbService.getSetting('own_channel_scheduler_logs')
       if (savedLogs) {
         this.logs = JSON.parse(savedLogs)
       }
-      console.log('[Scheduler] 配置已加载:', this.config)
+      console.log('[OwnChannelScheduler] 配置已加载:', this.config)
     } catch (error) {
-      console.error('[Scheduler] 加载配置失败:', error)
+      console.error('[OwnChannelScheduler] 加载配置失败:', error)
     }
   }
 
@@ -61,10 +61,10 @@ class SchedulerService {
   async saveConfig() {
     try {
       const { dbService } = this.services
-      await dbService.setSetting('scheduler_config', JSON.stringify(this.config))
-      console.log('[Scheduler] 配置已保存')
+      await dbService.setSetting('own_channel_scheduler_config', JSON.stringify(this.config))
+      console.log('[OwnChannelScheduler] 配置已保存')
     } catch (error) {
-      console.error('[Scheduler] 保存配置失败:', error)
+      console.error('[OwnChannelScheduler] 保存配置失败:', error)
     }
   }
 
@@ -78,9 +78,9 @@ class SchedulerService {
       if (this.logs.length > this.maxLogs) {
         this.logs = this.logs.slice(-this.maxLogs)
       }
-      await dbService.setSetting('scheduler_logs', JSON.stringify(this.logs))
+      await dbService.setSetting('own_channel_scheduler_logs', JSON.stringify(this.logs))
     } catch (error) {
-      console.error('[Scheduler] 保存日志失败:', error)
+      console.error('[OwnChannelScheduler] 保存日志失败:', error)
     }
   }
 
@@ -99,10 +99,10 @@ class SchedulerService {
 
     // 通知前端
     if (this.mainWindow && !this.mainWindow.isDestroyed()) {
-      this.mainWindow.webContents.send('scheduler:log', log)
+      this.mainWindow.webContents.send('own-channel-scheduler:log', log)
     }
 
-    console.log(`[Scheduler] [${type.toUpperCase()}] ${message}`)
+    console.log(`[OwnChannelScheduler] [${type.toUpperCase()}] ${message}`)
   }
 
   /**
@@ -121,7 +121,7 @@ class SchedulerService {
     // 立即检查一次
     this.checkAndExecute()
 
-    console.log('[Scheduler] 定时检查器已启动')
+    console.log('[OwnChannelScheduler] 定时检查器已启动')
   }
 
   /**
@@ -132,7 +132,7 @@ class SchedulerService {
       clearInterval(this.checkInterval)
       this.checkInterval = null
     }
-    console.log('[Scheduler] 定时检查器已停止')
+    console.log('[OwnChannelScheduler] 定时检查器已停止')
   }
 
   /**
@@ -144,7 +144,7 @@ class SchedulerService {
     }
 
     if (this.isRunning) {
-      console.log('[Scheduler] 任务正在执行中，跳过本次检查')
+      console.log('[OwnChannelScheduler] 任务正在执行中，跳过本次检查')
       return
     }
 
@@ -165,7 +165,7 @@ class SchedulerService {
         return
       }
 
-      console.log('[Scheduler] 到达执行时间，开始执行定时任务')
+      console.log('[OwnChannelScheduler] 到达执行时间，开始执行定时任务')
       this.addLog('info', `到达执行时间 ${this.config.executeTime}，开始执行定时任务`)
       await this.executeTask()
     }
@@ -211,15 +211,15 @@ class SchedulerService {
       this.addLog('info', `查询视频: ${startDate.toLocaleDateString()} ~ ${endDate.toLocaleDateString()}, 最小播放量: ${this.config.minViews}万, 生成状态: ${statusLabel}`)
       this.notifyStatus({ status: 'running', step: 'query', message: '正在查询符合条件的视频...' })
 
-      // 2. 查询视频
-      // pending_all 表示查询 null 和 pending 两种状态
+      // 2. 查询视频（自有频道视频表）
       const queryOptions = {
         dateRange: [startDate.toISOString(), endDate.toISOString()],
         minViews: this.config.minViews * 10000,
         status: this.config.generationStatus || 'pending_all',
         limit: 500,
         sortBy: 'published_at',
-        sortOrder: 'desc'
+        sortOrder: 'desc',
+        tableName: 'own_videos' // 关键：指定查询自有频道视频表
       }
 
       let allVideos = []
@@ -250,34 +250,39 @@ class SchedulerService {
       this.addLog('success', `找到 ${allVideos.length} 个符合条件的视频`)
       this.notifyStatus({ status: 'running', step: 'create_task', message: `找到 ${allVideos.length} 个视频，正在创建任务...` })
 
-      // 3. 创建任务
-      const taskName = `定时任务_${now.toLocaleDateString('zh-CN').replace(/\//g, '-')}_${now.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }).replace(':', '')}`
+      // 3. 创建任务（自有频道任务）
+      const taskName = `自有频道定时_${now.toLocaleDateString('zh-CN').replace(/\//g, '-')}_${now.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }).replace(':', '')}`
 
-      const taskId = await dbService.createCommentaryTask({
+      const taskId = dbService.createOwnChannelTask({
         name: taskName,
-        status: 'pending',
-        total_count: allVideos.length,
-        completed_count: 0,
-        failed_count: 0
+        filters: {
+          daysBack: this.config.daysBack,
+          daysForward: this.config.daysForward,
+          minViews: this.config.minViews,
+          generationStatus: this.config.generationStatus,
+          scheduledTask: true // 标记为定时任务创建
+        },
+        status: 'pending'
       })
 
-      // 4. 添加任务项（批量添加）
-      // 注意：保持原始字段名，因为 aistudio.service.js 会使用 video.id 来更新 Supabase
-      const taskItems = allVideos.map(video => ({
-        id: video.id,  // Supabase 记录 ID，用于更新状态
-        video_id: video.video_id,
-        video_url: video.url,
-        title: video.title,
-        channel_name: video.channel_name,
-        url: video.url
-      }))
-      await dbService.addCommentaryTaskItems(taskId, taskItems)
+      // 4. 添加任务项（循环添加到自有频道任务项表）
+      // 注意：own_videos 表可能没有 url 字段，需要手动构建
+      for (const video of allVideos) {
+        const videoInfo = {
+          id: video.id,  // Supabase 记录 ID，用于更新状态
+          video_id: video.video_id,
+          url: video.url || `https://www.youtube.com/watch?v=${video.video_id}`,
+          title: video.title,
+          channel_id: video.channel_id
+        }
+        dbService.addOwnChannelTaskItem(taskId, video.video_id, videoInfo)
+      }
 
       this.addLog('success', `任务创建成功: ${taskName} (ID: ${taskId})`)
       this.notifyStatus({ status: 'running', step: 'get_browsers', message: '正在获取可用浏览器...' })
 
       // 5. 获取浏览器
-      const accounts = await dbService.getAIStudioAccounts()
+      const accounts = dbService.getAIStudioAccounts()
       const activeBrowsers = accounts.filter(a => a.status === 'active')
 
       // 根据预选配置筛选浏览器
@@ -297,7 +302,7 @@ class SchedulerService {
       this.addLog('info', `使用 ${browsersToUse.length} 个浏览器并行执行`)
       this.notifyStatus({ status: 'running', step: 'execute', message: `使用 ${browsersToUse.length} 个浏览器开始执行...` })
 
-      // 6. 执行任务
+      // 6. 执行任务（使用 'own_channel' 任务类型）
       const browserIds = browsersToUse.map(b => b.bit_browser_id)
 
       // 设置进度回调
@@ -314,13 +319,13 @@ class SchedulerService {
           }
         })
 
-        // 同时发送 aistudio:progress 事件，让 CommentaryTaskPage 也能显示进度
+        // 同时发送 aistudio:progress 事件，让 OwnChannelCommentaryPage 也能显示进度
         if (this.mainWindow && !this.mainWindow.isDestroyed()) {
           this.mainWindow.webContents.send('aistudio:progress', progress)
         }
       }
 
-      await aiStudioService.startParallelTask(taskId, browserIds, progressCallback, 'benchmark')
+      await aiStudioService.startParallelTask(taskId, browserIds, progressCallback, 'own_channel')
 
       // 7. 完成
       const duration = Math.round((Date.now() - startTime) / 1000)
@@ -359,7 +364,7 @@ class SchedulerService {
    */
   notifyStatus(status) {
     if (this.mainWindow && !this.mainWindow.isDestroyed()) {
-      this.mainWindow.webContents.send('scheduler:status', status)
+      this.mainWindow.webContents.send('own-channel-scheduler:status', status)
     }
   }
 
@@ -466,4 +471,4 @@ class SchedulerService {
 }
 
 // 导出单例
-module.exports = new SchedulerService()
+module.exports = new OwnChannelSchedulerService()

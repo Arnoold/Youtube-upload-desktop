@@ -139,11 +139,43 @@ class DatabaseService {
       )
     `)
 
+    // 创建自有频道任务表
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS own_channel_tasks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT,
+        filters TEXT,
+        status TEXT DEFAULT 'pending',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        started_at DATETIME,
+        finished_at DATETIME
+      )
+    `)
+
+    // 创建自有频道任务项表
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS own_channel_task_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER NOT NULL,
+        video_id TEXT NOT NULL,
+        video_info TEXT,
+        status TEXT DEFAULT 'pending',
+        result TEXT,
+        error TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (task_id) REFERENCES own_channel_tasks (id)
+      )
+    `)
+
     // 迁移：为 browser_profiles 表添加新字段
     this.migrateBrowserProfiles()
 
     // 迁移：为 commentary_tasks 表添加时间字段
     this.migrateCommentaryTasks()
+
+    // 迁移：为 own_channel_tasks 表添加 name 字段
+    this.migrateOwnChannelTasks()
 
     // 创建采集账号表
     this.db.exec(`
@@ -290,6 +322,17 @@ class DatabaseService {
     if (!columnNames.includes('finished_at')) {
       this.db.exec('ALTER TABLE commentary_tasks ADD COLUMN finished_at DATETIME')
       console.log('Added finished_at column to commentary_tasks')
+    }
+  }
+
+  migrateOwnChannelTasks() {
+    const columns = this.db.pragma('table_info(own_channel_tasks)')
+    const columnNames = columns.map(col => col.name)
+
+    // 添加 name 字段（任务名称）
+    if (!columnNames.includes('name')) {
+      this.db.exec('ALTER TABLE own_channel_tasks ADD COLUMN name TEXT')
+      console.log('Added name column to own_channel_tasks')
     }
   }
 
@@ -968,6 +1011,173 @@ class DatabaseService {
         `).run(accountId)
       }
     }
+  }
+
+  // ===== 自有频道任务相关方法 =====
+
+  /**
+   * 创建自有频道任务
+   */
+  createOwnChannelTask(task) {
+    const stmt = this.db.prepare(`
+      INSERT INTO own_channel_tasks (
+        name, filters, status
+      ) VALUES (?, ?, ?)
+    `)
+
+    const info = stmt.run(
+      task.name,
+      JSON.stringify(task.filters || {}),
+      task.status || 'pending'
+    )
+
+    return info.lastInsertRowid
+  }
+
+  /**
+   * 添加自有频道任务项
+   */
+  addOwnChannelTaskItem(taskId, videoId, videoInfo) {
+    const stmt = this.db.prepare(`
+      INSERT INTO own_channel_task_items (
+        task_id, video_id, video_info, status
+      ) VALUES (?, ?, ?, ?)
+    `)
+
+    return stmt.run(
+      taskId,
+      videoId,
+      JSON.stringify(videoInfo || {}),
+      'pending'
+    )
+  }
+
+  /**
+   * 获取所有自有频道任务
+   */
+  getOwnChannelTasks() {
+    const tasks = this.db.prepare('SELECT * FROM own_channel_tasks ORDER BY created_at DESC').all()
+    return tasks.map(task => ({
+      ...task,
+      filters: JSON.parse(task.filters || '{}')
+    }))
+  }
+
+  /**
+   * 根据 ID 获取自有频道任务
+   */
+  getOwnChannelTaskById(id) {
+    const task = this.db.prepare('SELECT * FROM own_channel_tasks WHERE id = ?').get(id)
+    if (task) {
+      task.filters = JSON.parse(task.filters || '{}')
+    }
+    return task
+  }
+
+  /**
+   * 获取自有频道任务项
+   */
+  getOwnChannelTaskItems(taskId) {
+    const items = this.db.prepare('SELECT * FROM own_channel_task_items WHERE task_id = ? ORDER BY id ASC').all(taskId)
+    return items.map(item => ({
+      ...item,
+      video_info: JSON.parse(item.video_info || '{}')
+    }))
+  }
+
+  /**
+   * 获取自有频道任务统计
+   */
+  getOwnChannelTaskStats(taskId) {
+    const stats = this.db.prepare(`
+      SELECT
+        COUNT(*) as total,
+        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+        SUM(CASE WHEN status = 'failed' OR status = 'error' THEN 1 ELSE 0 END) as failed,
+        SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
+        SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as processing,
+        SUM(CASE WHEN status = 'video_deleted' THEN 1 ELSE 0 END) as video_deleted
+      FROM own_channel_task_items
+      WHERE task_id = ?
+    `).get(taskId)
+
+    return {
+      total: stats.total || 0,
+      completed: stats.completed || 0,
+      failed: stats.failed || 0,
+      pending: stats.pending || 0,
+      processing: stats.processing || 0,
+      video_deleted: stats.video_deleted || 0
+    }
+  }
+
+  /**
+   * 获取所有自有频道任务及统计信息
+   */
+  getOwnChannelTasksWithStats() {
+    const tasks = this.db.prepare('SELECT * FROM own_channel_tasks ORDER BY created_at DESC').all()
+
+    // 获取每个任务的统计信息
+    return tasks.map(task => {
+      const stats = this.db.prepare(`
+        SELECT
+          COUNT(*) as total,
+          SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+          SUM(CASE WHEN status = 'failed' OR status = 'error' THEN 1 ELSE 0 END) as failed,
+          SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
+          SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as processing,
+          SUM(CASE WHEN status = 'video_deleted' THEN 1 ELSE 0 END) as video_deleted
+        FROM own_channel_task_items
+        WHERE task_id = ?
+      `).get(task.id)
+
+      return {
+        ...task,
+        filters: JSON.parse(task.filters || '{}'),
+        stats: stats || { total: 0, completed: 0, failed: 0, pending: 0, processing: 0, video_deleted: 0 }
+      }
+    })
+  }
+
+  /**
+   * 更新自有频道任务状态
+   */
+  updateOwnChannelTaskStatus(id, status) {
+    return this.db.prepare('UPDATE own_channel_tasks SET status = ? WHERE id = ?').run(status, id)
+  }
+
+  /**
+   * 更新自有频道任务开始时间
+   */
+  updateOwnChannelTaskStartTime(id) {
+    return this.db.prepare('UPDATE own_channel_tasks SET started_at = CURRENT_TIMESTAMP WHERE id = ?').run(id)
+  }
+
+  /**
+   * 更新自有频道任务结束时间
+   */
+  updateOwnChannelTaskEndTime(id) {
+    return this.db.prepare('UPDATE own_channel_tasks SET finished_at = CURRENT_TIMESTAMP WHERE id = ?').run(id)
+  }
+
+  /**
+   * 更新自有频道任务项状态
+   */
+  updateOwnChannelTaskItemStatus(id, status, result = null, error = null) {
+    return this.db.prepare(`
+      UPDATE own_channel_task_items
+      SET status = ?, result = ?, error = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(status, result ? JSON.stringify(result) : null, error, id)
+  }
+
+  /**
+   * 删除自有频道任务
+   */
+  deleteOwnChannelTask(id) {
+    // 级联删除任务项
+    this.db.prepare('DELETE FROM own_channel_task_items WHERE task_id = ?').run(id)
+    return this.db.prepare('DELETE FROM own_channel_tasks WHERE id = ?').run(id)
   }
 
   /**

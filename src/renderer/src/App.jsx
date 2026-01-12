@@ -20,9 +20,11 @@ import SupabaseSettingsPage from './pages/SupabaseSettingsPage'
 import CommentaryTaskPage from './pages/CommentaryTaskPage'
 import DouyinPage from './pages/DouyinPage'
 import SchedulerPage from './pages/SchedulerPage'
+import OwnChannelSchedulerPage from './pages/OwnChannelSchedulerPage'
 import CollectAccountPage from './pages/CollectAccountPage'
 import BrowserSettingsPage from './pages/BrowserSettingsPage'
 import UploadLogsPage from './pages/UploadLogsPage'
+import OwnChannelCommentaryPage from './pages/OwnChannelCommentaryPage'
 
 const { Content, Sider } = Layout
 
@@ -77,9 +79,19 @@ const App = () => {
           label: '解说词任务'
         },
         {
+          key: 'own-channel-commentary-tasks',
+          icon: <FileTextOutlined />,
+          label: '自有频道解说词'
+        },
+        {
           key: 'scheduler',
           icon: <ClockCircleOutlined />,
           label: '定时任务'
+        },
+        {
+          key: 'own-channel-scheduler',
+          icon: <ClockCircleOutlined />,
+          label: '自有频道定时'
         },
         {
           key: 'aistudio-accounts',
@@ -123,8 +135,12 @@ const App = () => {
         return <DouyinPage />
       case 'commentary-tasks':
         return <CommentaryTaskPage />
+      case 'own-channel-commentary-tasks':
+        return <OwnChannelCommentaryPage />
       case 'scheduler':
         return <SchedulerPage />
+      case 'own-channel-scheduler':
+        return <OwnChannelSchedulerPage />
       case 'aistudio-accounts':
         return <AIStudioAccountsPage />
       case 'browser':
