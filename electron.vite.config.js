@@ -19,7 +19,8 @@ function copyFilesPlugin() {
     { from: 'src/main/services/clipboard-lock.service.js', to: 'dist-electron/main/services/clipboard-lock.service.js' },
     { from: 'src/main/services/douyin.service.js', to: 'dist-electron/main/services/douyin.service.js' },
     { from: 'src/main/services/scheduler.service.js', to: 'dist-electron/main/services/scheduler.service.js' },
-    { from: 'src/main/services/youtube-upload.service.js', to: 'dist-electron/main/services/youtube-upload.service.js' }
+    { from: 'src/main/services/youtube-upload.service.js', to: 'dist-electron/main/services/youtube-upload.service.js' },
+    { from: 'src/main/services/own-channel-scheduler.service.js', to: 'dist-electron/main/services/own-channel-scheduler.service.js' }
   ]
 
   function doCopy() {

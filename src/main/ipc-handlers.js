@@ -1373,6 +1373,112 @@ function setupIPC(mainWindow, services) {
     }
   })
 
+  // 获取当前视频发布信息 (作者、发布时间、点赞数、时长)
+  ipcMain.handle('douyin:get-video-publish-info', async () => {
+    try {
+      return await douyinService.getVideoPublishInfo()
+    } catch (error) {
+      console.error('douyin:get-video-publish-info error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // 点击收藏按钮
+  ipcMain.handle('douyin:click-favorite', async () => {
+    try {
+      return await douyinService.clickFavoriteButton()
+    } catch (error) {
+      console.error('douyin:click-favorite error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // 点击分享并复制链接
+  ipcMain.handle('douyin:share-copy-link', async () => {
+    try {
+      return await douyinService.clickShareAndCopyLink()
+    } catch (error) {
+      console.error('douyin:share-copy-link error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // 连续采集推荐视频 (符合时间条件的视频)
+  ipcMain.handle('douyin:collect-recommended', async (event, options = {}) => {
+    try {
+      // 获取当前账号信息
+      const accountId = douyinService.currentBrowserId || ''
+      const accountName = options.accountName || ''
+
+      const result = await douyinService.collectRecommendedVideos((progress) => {
+        mainWindow.webContents.send('douyin:recommend-progress', progress)
+
+        // 实时保存每个采集到的视频
+        if (progress.type === 'collected' && progress.video) {
+          try {
+            dbService.saveDouyinVideo({
+              ...progress.video,
+              accountId,
+              accountName
+            })
+          } catch (err) {
+            console.error('Failed to save video to database:', err)
+          }
+        }
+      }, options)
+
+      return result
+    } catch (error) {
+      console.error('douyin:collect-recommended error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // 获取抖音采集历史视频列表
+  ipcMain.handle('douyin:get-history-videos', async (event, options = {}) => {
+    try {
+      const videos = dbService.getDouyinVideos(options)
+      const total = dbService.getDouyinVideoCount(options.date)
+      return { success: true, videos, total }
+    } catch (error) {
+      console.error('douyin:get-history-videos error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // 获取抖音采集日期列表
+  ipcMain.handle('douyin:get-collection-dates', async () => {
+    try {
+      const dates = dbService.getDouyinCollectionDates()
+      return { success: true, dates }
+    } catch (error) {
+      console.error('douyin:get-collection-dates error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // 删除单个抖音采集视频
+  ipcMain.handle('douyin:delete-video', async (event, id) => {
+    try {
+      dbService.deleteDouyinVideo(id)
+      return { success: true }
+    } catch (error) {
+      console.error('douyin:delete-video error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // 清空所有抖音采集视频
+  ipcMain.handle('douyin:clear-all-videos', async () => {
+    try {
+      dbService.clearDouyinVideos()
+      return { success: true }
+    } catch (error) {
+      console.error('douyin:clear-all-videos error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
   // ===== 定时任务相关 =====
   const schedulerService = require('./services/scheduler.service')
 

@@ -1,41 +1,30 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import {
   Card,
   Button,
   Table,
   Space,
   message,
-  InputNumber,
   Typography,
   Tag,
   Tooltip,
-  Alert,
-  Progress,
   Popconfirm,
   Select,
   Badge,
   Divider
 } from 'antd'
 import {
-  PlayCircleOutlined,
   PauseCircleOutlined,
   ReloadOutlined,
-  UpOutlined,
-  DownOutlined,
-  CopyOutlined,
   DeleteOutlined,
   ChromeOutlined,
   CloseOutlined,
   LinkOutlined,
-  UserOutlined,
-  CloudDownloadOutlined,
-  HeartOutlined,
-  MessageOutlined,
-  ShareAltOutlined,
-  StarOutlined
+  StarOutlined,
+  ClockCircleOutlined
 } from '@ant-design/icons'
 
-const { Title, Text, Paragraph } = Typography
+const { Title, Text } = Typography
 
 const DouyinPage = () => {
   const [browserStatus, setBrowserStatus] = useState({
@@ -46,14 +35,20 @@ const DouyinPage = () => {
   })
   const [accounts, setAccounts] = useState([])
   const [selectedAccount, setSelectedAccount] = useState(null)
-  const [videos, setVideos] = useState([])
-  const [loading, setLoading] = useState(false)
   const [connectingBrowser, setConnectingBrowser] = useState(false)
-  const [collectCount, setCollectCount] = useState(10)
-  const [progress, setProgress] = useState({ current: 0, total: 0 })
-  const [currentVideo, setCurrentVideo] = useState(null)
-  const [pageData, setPageData] = useState([])
-  const [fetchingPageData, setFetchingPageData] = useState(false)
+  const [recommendedVideos, setRecommendedVideos] = useState([])
+  const [isCollectingRecommended, setIsCollectingRecommended] = useState(false)
+  const [recommendProgress, setRecommendProgress] = useState({ collected: 0, processed: 0, skipped: 0 })
+  const [currentOperation, setCurrentOperation] = useState('') // 当前操作步骤
+  const [historyVideos, setHistoryVideos] = useState([])
+  const [historyTotal, setHistoryTotal] = useState(0)
+  const [historyPage, setHistoryPage] = useState(1)
+  const [historyPageSize, setHistoryPageSize] = useState(20)
+  const [collectDuration, setCollectDuration] = useState(60) // 采集时长（分钟），默认60分钟
+  const [remainingTime, setRemainingTime] = useState(0) // 剩余时间（秒）
+  const [collectionError, setCollectionError] = useState('') // 采集错误信息
+  const collectTimerRef = useRef(null) // 采集定时器
+  const countdownRef = useRef(null) // 倒计时定时器
 
   // 加载采集账号列表
   const loadAccounts = async () => {
@@ -75,37 +70,86 @@ const DouyinPage = () => {
     try {
       const status = await window.electron.douyin.getStatus()
       setBrowserStatus(status)
-
-      if (status.browserRunning) {
-        const collected = await window.electron.douyin.getCollected()
-        setVideos(collected)
-      }
     } catch (error) {
       console.error('Failed to fetch status:', error)
     }
   }
 
-  // 监听采集进度
+  // 加载历史采集视频
+  const loadHistoryVideos = async (page = 1, pageSize = 20) => {
+    try {
+      const result = await window.electron.douyin.getHistoryVideos({
+        limit: pageSize,
+        offset: (page - 1) * pageSize
+      })
+      if (result.success) {
+        // 转换数据库字段名为前端字段名
+        const videos = result.videos.map(v => ({
+          id: v.id,
+          authorName: v.author_name,
+          publishTime: v.publish_time,
+          likeCount: v.like_count,
+          duration: v.duration,
+          videoLink: v.video_link,
+          shortLink: v.short_link,
+          finalLink: v.final_link,
+          favorited: v.favorited === 1,
+          accountName: v.account_name,
+          collectedAt: v.collected_at
+        }))
+        setHistoryVideos(videos)
+        setHistoryTotal(result.total)
+      }
+    } catch (error) {
+      console.error('Failed to load history videos:', error)
+    }
+  }
+
+  // 监听推荐视频采集进度
   useEffect(() => {
-    window.electron.douyin.onProgress((data) => {
-      setProgress({ current: data.current, total: data.total })
-      if (data.video) {
-        setVideos(prev => {
-          const exists = prev.some(v => v.videoId === data.video.videoId)
-          if (!exists) {
-            return [...prev, data.video]
-          }
-          return prev
-        })
+    window.electron.douyin.onRecommendProgress((data) => {
+      setRecommendProgress({
+        collected: data.current || 0,
+        processed: data.processed || 0,
+        skipped: data.skipped || 0
+      })
+      // 更新当前操作步骤
+      if (data.operation) {
+        setCurrentOperation(data.operation)
+      }
+      if (data.type === 'collected' && data.video) {
+        setRecommendedVideos(prev => [...prev, data.video])
+        // 同时添加到历史记录表格中实时显示
+        const newVideo = {
+          id: `new_${Date.now()}`,
+          authorName: data.video.authorName,
+          publishTime: data.video.publishTime,
+          likeCount: data.video.likeCount,
+          duration: data.video.duration,
+          videoLink: data.video.videoLink,
+          shortLink: data.video.shortLink,
+          finalLink: data.video.finalLink,
+          favorited: data.video.favorited,
+          collectedAt: data.video.collectedAt
+        }
+        setHistoryVideos(prev => [newVideo, ...prev])
+        setHistoryTotal(prev => prev + 1)
+        setCurrentOperation('✅ 采集完成，滑动到下一个视频...')
+      } else if (data.type === 'skipped') {
+        setCurrentOperation(`⏭️ 跳过: ${data.reason || '不符合条件'}`)
       }
     })
 
     // 初始化
     loadAccounts()
     fetchStatus()
+    loadHistoryVideos()
 
     return () => {
-      window.electron.douyin.removeListener('douyin:progress')
+      window.electron.douyin.removeListener('douyin:recommend-progress')
+      // 清理定时器
+      if (collectTimerRef.current) clearTimeout(collectTimerRef.current)
+      if (countdownRef.current) clearInterval(countdownRef.current)
     }
   }, [])
 
@@ -137,90 +181,6 @@ const DouyinPage = () => {
     }
   }
 
-  // 打开抖音
-  const handleOpenDouyin = async () => {
-    setLoading(true)
-    try {
-      const result = await window.electron.douyin.open()
-      if (result.success) {
-        message.success('抖音页面已打开')
-      } else {
-        message.error(result.error || '打开失败')
-      }
-    } catch (error) {
-      message.error('打开抖音失败: ' + error.message)
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  // 获取当前视频
-  const handleGetCurrent = async () => {
-    try {
-      const result = await window.electron.douyin.getCurrentVideo()
-      if (result.success) {
-        setCurrentVideo(result.video)
-        message.success('获取视频信息成功')
-      } else {
-        message.warning(result.error || '无法获取视频信息')
-      }
-    } catch (error) {
-      message.error('获取视频失败: ' + error.message)
-    }
-  }
-
-  // 滑动到下一个
-  const handleScrollNext = async () => {
-    try {
-      await window.electron.douyin.scrollNext()
-    } catch (error) {
-      message.error('滑动失败: ' + error.message)
-    }
-  }
-
-  // 滑动到上一个
-  const handleScrollPrev = async () => {
-    try {
-      await window.electron.douyin.scrollPrev()
-    } catch (error) {
-      message.error('滑动失败: ' + error.message)
-    }
-  }
-
-  // 开始自动采集
-  const handleCollect = async () => {
-    setLoading(true)
-    setProgress({ current: 0, total: collectCount })
-    try {
-      const result = await window.electron.douyin.collect(collectCount)
-      if (result.success) {
-        message.success(`采集完成，共获取 ${result.count} 个视频`)
-        setVideos(result.videos)
-      } else {
-        message.warning(result.error || '采集中断')
-        if (result.videos) {
-          setVideos(result.videos)
-        }
-      }
-    } catch (error) {
-      message.error('采集失败: ' + error.message)
-    } finally {
-      setLoading(false)
-      setProgress({ current: 0, total: 0 })
-      await fetchStatus()
-    }
-  }
-
-  // 停止采集
-  const handleStop = async () => {
-    try {
-      await window.electron.douyin.stop()
-      message.info('采集已停止')
-      await fetchStatus()
-    } catch (error) {
-      message.error('停止失败: ' + error.message)
-    }
-  }
 
   // 断开浏览器连接
   const handleClose = async () => {
@@ -238,152 +198,209 @@ const DouyinPage = () => {
     }
   }
 
-  // 清空列表
-  const handleClear = async () => {
+  // 清理定时器
+  const clearTimers = () => {
+    if (collectTimerRef.current) {
+      clearTimeout(collectTimerRef.current)
+      collectTimerRef.current = null
+    }
+    if (countdownRef.current) {
+      clearInterval(countdownRef.current)
+      countdownRef.current = null
+    }
+    setRemainingTime(0)
+  }
+
+  // 开始连续采集推荐视频
+  const handleCollectRecommended = async () => {
+    setIsCollectingRecommended(true)
+    setRecommendProgress({ collected: 0, processed: 0, skipped: 0 })
+    setRecommendedVideos([])
+    setCurrentOperation('🚀 开始采集...')
+    setCollectionError('') // 清空之前的错误
+
+    // 设置定时停止
+    const durationMs = collectDuration * 60 * 1000
+    setRemainingTime(collectDuration * 60)
+
+    // 倒计时显示
+    countdownRef.current = setInterval(() => {
+      setRemainingTime(prev => {
+        if (prev <= 1) {
+          return 0
+        }
+        return prev - 1
+      })
+    }, 1000)
+
+    // 定时停止采集
+    collectTimerRef.current = setTimeout(async () => {
+      console.log('[DouyinPage] Auto stopping collection after', collectDuration, 'minutes')
+      message.info(`采集时间已到 ${collectDuration} 分钟，自动停止`)
+      await window.electron.douyin.stop()
+    }, durationMs)
+
     try {
-      await window.electron.douyin.clear()
-      setVideos([])
-      message.success('列表已清空')
+      const result = await window.electron.douyin.collectRecommended({ maxCount: 0 }) // 0表示无限制
+      if (result.success) {
+        message.success(`采集完成！收集: ${result.collected}, 处理: ${result.processed}, 跳过: ${result.skipped}`)
+        setRecommendedVideos(result.videos)
+        setCollectionError('') // 成功时清空错误
+      } else {
+        message.warning(result.error || '采集中断')
+        if (result.videos) {
+          setRecommendedVideos(result.videos)
+        }
+        // 设置错误信息显示在按钮下方
+        if (result.error) {
+          setCollectionError(result.error)
+        }
+      }
+    } catch (error) {
+      message.error('采集失败: ' + error.message)
+      setCollectionError(error.message)
+    } finally {
+      clearTimers()
+      setIsCollectingRecommended(false)
+      setCurrentOperation('')
+      await fetchStatus()
+      // 刷新历史记录
+      loadHistoryVideos(1, historyPageSize)
+      setHistoryPage(1)
+    }
+  }
+
+  // 停止推荐视频采集
+  const handleStopRecommended = async () => {
+    try {
+      clearTimers()
+      await window.electron.douyin.stop()
+      message.info('采集已停止')
+      setIsCollectingRecommended(false)
+      setCurrentOperation('')
+      await fetchStatus()
+      // 刷新历史记录
+      loadHistoryVideos(1, historyPageSize)
+      setHistoryPage(1)
+    } catch (error) {
+      message.error('停止失败: ' + error.message)
+    }
+  }
+
+  // 清空推荐视频列表（清空数据库历史）
+  const handleClearRecommended = async () => {
+    try {
+      await window.electron.douyin.clearAllVideos()
+      setRecommendedVideos([])
+      setHistoryVideos([])
+      setHistoryTotal(0)
+      setRecommendProgress({ collected: 0, processed: 0, skipped: 0 })
+      message.success('已清空所有历史数据')
     } catch (error) {
       message.error('清空失败: ' + error.message)
     }
   }
 
-  // 复制链接
-  const handleCopyLink = (url) => {
-    navigator.clipboard.writeText(url)
-    message.success('链接已复制')
+  // 处理分页变化
+  const handlePageChange = (page, pageSize) => {
+    setHistoryPage(page)
+    setHistoryPageSize(pageSize)
+    loadHistoryVideos(page, pageSize)
   }
 
-  // 复制所有链接
-  const handleCopyAll = () => {
-    const links = videos.map(v => v.videoUrl).filter(Boolean).join('\n')
-    if (links) {
-      navigator.clipboard.writeText(links)
-      message.success(`已复制 ${videos.filter(v => v.videoUrl).length} 个链接`)
-    } else {
-      message.warning('没有可复制的链接')
-    }
-  }
-
-  // 刷新账号列表
-  const handleRefreshAccounts = async () => {
-    await loadAccounts()
-    message.success('已刷新账号列表')
-  }
-
-  // 获取页面数据
-  const handleGetPageData = async () => {
-    setFetchingPageData(true)
-    try {
-      const result = await window.electron.douyin.getPageData()
-      if (result.success) {
-        setPageData(result.videos)
-        message.success(`成功获取 ${result.count} 条视频数据`)
-      } else {
-        message.error(result.error || '获取数据失败')
-      }
-    } catch (error) {
-      message.error('获取页面数据失败: ' + error.message)
-    } finally {
-      setFetchingPageData(false)
-    }
-  }
-
-  // 格式化数字
-  const formatNumber = (num) => {
-    if (!num) return '0'
-    if (num >= 10000) {
-      return (num / 10000).toFixed(1) + 'w'
-    }
-    return num.toString()
-  }
-
-  // 表格列定义
-  const columns = [
+  // 推荐视频表格列定义
+  const recommendedColumns = [
     {
       title: '序号',
       key: 'index',
       width: 60,
-      render: (_, __, index) => index + 1
+      // 倒序显示：最新的在最上面，序号最大
+      render: (_, __, index) => historyTotal - ((historyPage - 1) * historyPageSize) - index
     },
     {
-      title: '视频ID',
-      dataIndex: 'videoId',
-      key: 'videoId',
-      width: 180,
-      ellipsis: true,
-      render: (id) => (
-        <Tooltip title={id}>
-          <Text copyable={{ text: id }}>{id}</Text>
-        </Tooltip>
-      )
-    },
-    {
-      title: '作者',
+      title: '博主名称',
       dataIndex: 'authorName',
       key: 'authorName',
-      width: 120,
+      width: 150,
       ellipsis: true,
-      render: (name, record) => (
-        <Tooltip title={`@${record.authorId || 'unknown'}`}>
-          {name || '-'}
+      render: (name) => (
+        <Tooltip title={name}>
+          <Text>{name || '-'}</Text>
         </Tooltip>
       )
     },
     {
-      title: '描述',
-      dataIndex: 'description',
-      key: 'description',
+      title: '发布时间',
+      dataIndex: 'publishTime',
+      key: 'publishTime',
+      width: 100,
+      render: (time) => <Tag color="blue">{time || '-'}</Tag>
+    },
+    {
+      title: '点赞数',
+      dataIndex: 'likeCount',
+      key: 'likeCount',
+      width: 100,
+      render: (count) => <Tag color="red">{count || '-'}</Tag>
+    },
+    {
+      title: '时长',
+      dataIndex: 'duration',
+      key: 'duration',
+      width: 80,
+      render: (duration) => <Tag color="green">{duration || '-'}</Tag>
+    },
+    {
+      title: '已收藏',
+      dataIndex: 'favorited',
+      key: 'favorited',
+      width: 80,
+      render: (favorited) => (
+        favorited ? <Tag color="gold"><StarOutlined /> 是</Tag> : <Tag>否</Tag>
+      )
+    },
+    {
+      title: '最终链接',
+      dataIndex: 'finalLink',
+      key: 'finalLink',
+      width: 200,
       ellipsis: true,
-      render: (desc) => (
-        <Tooltip title={desc}>
-          <Paragraph ellipsis={{ rows: 1 }} style={{ marginBottom: 0 }}>
-            {desc || '-'}
-          </Paragraph>
-        </Tooltip>
+      render: (link) => (
+        link ? (
+          <Space size="small">
+            <Text copyable={{ text: link }} style={{ fontSize: 11 }}>
+              {link.includes('/video/') ? link.split('/video/')[1]?.slice(0, 15) + '...' : link.slice(0, 20)}
+            </Text>
+            <Button
+              type="link"
+              size="small"
+              icon={<LinkOutlined />}
+              onClick={() => window.electron.shell.openExternal(link)}
+              style={{ padding: 0 }}
+            />
+          </Space>
+        ) : <Text type="secondary">-</Text>
       )
     },
     {
-      title: '互动数据',
-      key: 'stats',
-      width: 180,
-      render: (_, record) => (
-        <Space size="small">
-          {record.likes && <Tag color="red">{record.likes} 赞</Tag>}
-          {record.comments && <Tag color="blue">{record.comments} 评</Tag>}
-          {record.shares && <Tag color="green">{record.shares} 转</Tag>}
-        </Space>
-      )
-    },
-    {
-      title: '操作',
-      key: 'action',
-      width: 120,
-      render: (_, record) => (
-        <Space>
-          {record.videoUrl && (
-            <>
-              <Tooltip title="复制链接">
-                <Button
-                  type="link"
-                  size="small"
-                  icon={<CopyOutlined />}
-                  onClick={() => handleCopyLink(record.videoUrl)}
-                />
-              </Tooltip>
-              <Tooltip title="打开链接">
-                <Button
-                  type="link"
-                  size="small"
-                  icon={<LinkOutlined />}
-                  onClick={() => window.open(record.videoUrl, '_blank')}
-                />
-              </Tooltip>
-            </>
-          )}
-        </Space>
-      )
+      title: '采集时间',
+      dataIndex: 'collectedAt',
+      key: 'collectedAt',
+      width: 140,
+      render: (time) => {
+        if (!time) return <Text type="secondary">-</Text>
+        const d = new Date(time)
+        const month = String(d.getMonth() + 1).padStart(2, '0')
+        const day = String(d.getDate()).padStart(2, '0')
+        const hours = String(d.getHours()).padStart(2, '0')
+        const minutes = String(d.getMinutes()).padStart(2, '0')
+        const seconds = String(d.getSeconds()).padStart(2, '0')
+        return (
+          <Text type="secondary" style={{ fontSize: 11 }}>
+            {`${month}-${day} ${hours}:${minutes}:${seconds}`}
+          </Text>
+        )
+      }
     }
   ]
 
@@ -391,141 +408,44 @@ const DouyinPage = () => {
     <div>
       <Title level={4}>抖音视频采集</Title>
 
-      {/* 连接状态 */}
+      {/* 操作栏 - 合并为一行 */}
       <Card size="small" style={{ marginBottom: 16 }}>
-        <Space split={<Divider type="vertical" />}>
-          <span>
-            浏览器状态：
+        <Space wrap style={{ width: '100%', justifyContent: 'space-between' }}>
+          <Space wrap>
+            {/* 浏览器状态 */}
             {browserStatus.browserRunning ? (
               <Badge status="success" text={<Text type="success">已连接</Text>} />
             ) : (
               <Badge status="default" text="未连接" />
             )}
-          </span>
-          {browserStatus.browserRunning && browserStatus.currentBrowserId && (
-            <span>
-              <Text type="secondary">浏览器ID: {browserStatus.currentBrowserId.slice(0, 8)}...</Text>
-            </span>
-          )}
-          <Button size="small" icon={<ReloadOutlined />} onClick={fetchStatus}>
-            刷新状态
-          </Button>
-        </Space>
-      </Card>
 
-      {/* 账号选择 */}
-      <Card title="选择采集账号" style={{ marginBottom: 16 }}>
-        <Space direction="vertical" style={{ width: '100%' }}>
-          <Space>
+            <Divider type="vertical" />
+
+            {/* 账号选择 */}
             <Select
-              style={{ width: 300 }}
+              style={{ width: 180 }}
               placeholder="选择采集账号"
               value={selectedAccount}
               onChange={setSelectedAccount}
               disabled={browserStatus.browserRunning}
               options={accounts.map(a => ({
                 value: a.bit_browser_id,
-                label: (
-                  <Space>
-                    <UserOutlined />
-                    {a.name}
-                    {a.remark && <Text type="secondary">({a.remark})</Text>}
-                  </Space>
-                )
+                label: a.name
               }))}
             />
-            <Button
-              icon={<ReloadOutlined />}
-              onClick={handleRefreshAccounts}
-              disabled={browserStatus.browserRunning}
-            >
-              刷新
-            </Button>
-          </Space>
 
-          {accounts.length === 0 && (
-            <Alert
-              message="未找到采集账号"
-              description="请先在「采集账号管理」页面添加比特浏览器账号。"
-              type="warning"
-              showIcon
-            />
-          )}
-        </Space>
-      </Card>
-
-      {/* 控制面板 */}
-      <Card title="控制面板" style={{ marginBottom: 16 }}>
-        <Space wrap>
-          {!browserStatus.browserRunning ? (
-            <Button
-              type="primary"
-              icon={<ChromeOutlined />}
-              onClick={handleLaunch}
-              loading={connectingBrowser}
-              disabled={!selectedAccount}
-            >
-              启动浏览器
-            </Button>
-          ) : (
-            <>
+            {/* 启动/断开按钮 */}
+            {!browserStatus.browserRunning ? (
               <Button
-                icon={<PlayCircleOutlined />}
-                onClick={handleOpenDouyin}
-                loading={loading}
+                type="primary"
+                icon={<ChromeOutlined />}
+                onClick={handleLaunch}
+                loading={connectingBrowser}
+                disabled={!selectedAccount}
               >
-                打开抖音
+                启动浏览器
               </Button>
-
-              <Button.Group>
-                <Button icon={<UpOutlined />} onClick={handleScrollPrev}>
-                  上一个
-                </Button>
-                <Button icon={<DownOutlined />} onClick={handleScrollNext}>
-                  下一个
-                </Button>
-              </Button.Group>
-
-              <Button icon={<ReloadOutlined />} onClick={handleGetCurrent}>
-                获取当前视频
-              </Button>
-
-              <Button
-                icon={<CloudDownloadOutlined />}
-                onClick={handleGetPageData}
-                loading={fetchingPageData}
-              >
-                抓取页面数据
-              </Button>
-
-              <Space.Compact>
-                <InputNumber
-                  min={1}
-                  max={100}
-                  value={collectCount}
-                  onChange={setCollectCount}
-                  style={{ width: 80 }}
-                  disabled={browserStatus.isCollecting}
-                />
-                {!browserStatus.isCollecting ? (
-                  <Button
-                    type="primary"
-                    onClick={handleCollect}
-                    loading={loading}
-                  >
-                    自动采集
-                  </Button>
-                ) : (
-                  <Button
-                    danger
-                    icon={<PauseCircleOutlined />}
-                    onClick={handleStop}
-                  >
-                    停止
-                  </Button>
-                )}
-              </Space.Compact>
-
+            ) : (
               <Button
                 danger
                 icon={<CloseOutlined />}
@@ -533,175 +453,140 @@ const DouyinPage = () => {
               >
                 断开连接
               </Button>
-            </>
-          )}
+            )}
+
+            {/* 采集按钮 - 连接后显示 */}
+            {browserStatus.browserRunning && (
+              <>
+                <Divider type="vertical" />
+                {!isCollectingRecommended ? (
+                  <>
+                    <Select
+                      style={{ width: 110 }}
+                      value={collectDuration}
+                      onChange={setCollectDuration}
+                      options={[
+                        { value: 10, label: '10分钟' },
+                        { value: 30, label: '30分钟' },
+                        { value: 60, label: '60分钟' },
+                        { value: 120, label: '120分钟' },
+                        { value: 300, label: '300分钟' }
+                      ]}
+                    />
+                    <Button
+                      type="primary"
+                      icon={<StarOutlined />}
+                      onClick={handleCollectRecommended}
+                    >
+                      开始采集
+                    </Button>
+                  </>
+                ) : (
+                  <>
+                    {remainingTime > 0 && (
+                      <Tag color="blue" icon={<ClockCircleOutlined />}>
+                        剩余 {Math.floor(remainingTime / 60)}:{String(remainingTime % 60).padStart(2, '0')}
+                      </Tag>
+                    )}
+                    <Button
+                      danger
+                      icon={<PauseCircleOutlined />}
+                      onClick={handleStopRecommended}
+                    >
+                      停止采集
+                    </Button>
+                  </>
+                )}
+              </>
+            )}
+          </Space>
+
+          {/* 右侧刷新按钮 */}
+          <Button size="small" icon={<ReloadOutlined />} onClick={() => { fetchStatus(); loadAccounts(); }}>
+            刷新
+          </Button>
         </Space>
 
-        {/* 采集进度 */}
-        {progress.total > 0 && (
-          <div style={{ marginTop: 16 }}>
-            <Progress
-              percent={Math.round((progress.current / progress.total) * 100)}
-              status="active"
-              format={() => `${progress.current}/${progress.total}`}
-            />
+        {/* 进度和操作步骤 - 采集时显示 */}
+        {browserStatus.browserRunning && (
+          <div style={{ marginTop: 12, display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+            <Space size="middle">
+              <span>已刷: <Text strong>{recommendProgress.processed}</Text></span>
+              <span>已采集: <Text strong type="success">{recommendProgress.collected}</Text></span>
+              <span>已跳过: <Text strong type="warning">{recommendProgress.skipped}</Text></span>
+            </Space>
+            {isCollectingRecommended && currentOperation && (
+              <Text type="secondary" style={{ fontSize: 12 }}>| {currentOperation}</Text>
+            )}
           </div>
         )}
 
-        {/* 当前视频信息 */}
-        {currentVideo && (
-          <Card size="small" style={{ marginTop: 16 }} title="当前视频">
-            <p><strong>视频ID:</strong> {currentVideo.videoId}</p>
-            <p><strong>作者:</strong> {currentVideo.authorName} (@{currentVideo.authorId})</p>
-            <p><strong>描述:</strong> {currentVideo.description}</p>
-            {currentVideo.videoUrl && (
-              <p>
-                <strong>链接:</strong>{' '}
-                <a href={currentVideo.videoUrl} target="_blank" rel="noreferrer">
-                  {currentVideo.videoUrl}
-                </a>
-              </p>
-            )}
-          </Card>
+        {/* 错误信息显示 */}
+        {collectionError && (
+          <div style={{
+            marginTop: 12,
+            padding: '8px 12px',
+            backgroundColor: '#fff2f0',
+            border: '1px solid #ffccc7',
+            borderRadius: 4
+          }}>
+            <Text type="danger" style={{ fontSize: 13 }}>
+              ❌ 采集错误: {collectionError}
+            </Text>
+          </div>
         )}
       </Card>
 
-      {/* 采集结果 */}
+      {/* 采集结果表格 */}
       <Card
-        title={`采集结果 (${videos.length} 个视频)`}
-        extra={
-          <Space>
-            <Button
-              icon={<CopyOutlined />}
-              onClick={handleCopyAll}
-              disabled={videos.length === 0}
-            >
-              复制所有链接
-            </Button>
-            <Popconfirm
-              title="确定要清空列表吗？"
-              onConfirm={handleClear}
-              okText="确定"
-              cancelText="取消"
-            >
-              <Button
-                danger
-                icon={<DeleteOutlined />}
-                disabled={videos.length === 0}
-              >
-                清空
-              </Button>
-            </Popconfirm>
-          </Space>
-        }
-      >
-        <Table
-          columns={columns}
-          dataSource={videos}
-          rowKey="videoId"
-          size="small"
-          pagination={{
-            pageSize: 20,
-            showSizeChanger: true,
-            showQuickJumper: true,
-            showTotal: (total) => `共 ${total} 个视频`
-          }}
-        />
-      </Card>
-
-      {/* 页面数据展示 */}
-      {pageData.length > 0 && (
-        <Card
-          title={`页面数据 (${pageData.length} 条)`}
-          style={{ marginTop: 16 }}
+          title={
+            <Space>
+              <StarOutlined style={{ color: '#ff4d4f' }} />
+              {`采集历史记录 (共 ${historyTotal} 个视频${recommendedVideos.length > 0 ? `，本次新增 ${recommendedVideos.length} 个` : ''})`}
+            </Space>
+          }
           extra={
-            <Button
-              icon={<DeleteOutlined />}
-              size="small"
-              onClick={() => setPageData([])}
-            >
-              清空
-            </Button>
+            <Space>
+              <Button
+                size="small"
+                icon={<ReloadOutlined />}
+                onClick={() => loadHistoryVideos(historyPage, historyPageSize)}
+              >
+                刷新
+              </Button>
+              <Popconfirm
+                title="确定要清空所有历史数据吗？"
+                onConfirm={handleClearRecommended}
+                okText="确定"
+                cancelText="取消"
+              >
+                <Button
+                  danger
+                  icon={<DeleteOutlined />}
+                  disabled={historyTotal === 0}
+                >
+                  清空历史
+                </Button>
+              </Popconfirm>
+            </Space>
           }
         >
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16 }}>
-            {pageData.map((item, index) => (
-              <Card
-                key={item.awemeId || index}
-                size="small"
-                style={{ width: 320 }}
-                cover={
-                  item.video?.cover ? (
-                    <img
-                      alt="cover"
-                      src={item.video.cover}
-                      style={{ height: 180, objectFit: 'cover' }}
-                    />
-                  ) : null
-                }
-              >
-                <Card.Meta
-                  avatar={
-                    item.author?.avatarThumb ? (
-                      <img
-                        src={item.author.avatarThumb}
-                        alt="avatar"
-                        style={{ width: 40, height: 40, borderRadius: '50%' }}
-                      />
-                    ) : (
-                      <UserOutlined style={{ fontSize: 24 }} />
-                    )
-                  }
-                  title={
-                    <Tooltip title={item.author?.nickname}>
-                      <Text ellipsis style={{ maxWidth: 200 }}>
-                        {item.author?.nickname || '未知作者'}
-                      </Text>
-                    </Tooltip>
-                  }
-                  description={
-                    <Text type="secondary" style={{ fontSize: 12 }}>
-                      粉丝: {formatNumber(item.author?.followerCount)}
-                    </Text>
-                  }
-                />
-
-                <Tooltip title={item.desc}>
-                  <Paragraph
-                    ellipsis={{ rows: 2 }}
-                    style={{ marginTop: 12, marginBottom: 8, minHeight: 44 }}
-                  >
-                    {item.desc || '无描述'}
-                  </Paragraph>
-                </Tooltip>
-
-                <div style={{ display: 'flex', justifyContent: 'space-between', color: '#999', fontSize: 12 }}>
-                  <span><HeartOutlined /> {formatNumber(item.statistics?.diggCount)}</span>
-                  <span><MessageOutlined /> {formatNumber(item.statistics?.commentCount)}</span>
-                  <span><StarOutlined /> {formatNumber(item.statistics?.collectCount)}</span>
-                  <span><ShareAltOutlined /> {formatNumber(item.statistics?.shareCount)}</span>
-                </div>
-
-                {item.textExtra?.length > 0 && (
-                  <div style={{ marginTop: 8 }}>
-                    {item.textExtra.slice(0, 3).map((tag, i) => (
-                      <Tag key={i} color="blue" style={{ fontSize: 10 }}>
-                        #{tag.hashtagName}
-                      </Tag>
-                    ))}
-                  </div>
-                )}
-
-                <div style={{ marginTop: 8, fontSize: 11, color: '#999' }}>
-                  <Text copyable={{ text: item.awemeId }} style={{ fontSize: 11 }}>
-                    ID: {item.awemeId?.slice(0, 12)}...
-                  </Text>
-                </div>
-              </Card>
-            ))}
-          </div>
+          <Table
+            columns={recommendedColumns}
+            dataSource={historyVideos}
+            rowKey={(record) => record.id || `${record.authorName}_${record.collectedAt}`}
+            size="small"
+            pagination={{
+              current: historyPage,
+              pageSize: historyPageSize,
+              total: historyTotal,
+              showSizeChanger: true,
+              showQuickJumper: true,
+              showTotal: (total) => `共 ${total} 个视频`,
+              onChange: handlePageChange
+            }}
+          />
         </Card>
-      )}
     </div>
   )
 }

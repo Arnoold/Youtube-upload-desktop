@@ -1,7 +1,12 @@
-const { contextBridge, ipcRenderer } = require('electron')
+const { contextBridge, ipcRenderer, shell } = require('electron')
 
 // 暴露安全的 API 给渲染进程
 contextBridge.exposeInMainWorld('electron', {
+  // Shell - 用系统默认程序打开
+  shell: {
+    openExternal: (url) => shell.openExternal(url)
+  },
+
   // 文件管理
   file: {
     scan: (folderPath) => ipcRenderer.invoke('file:scan', folderPath),
@@ -177,9 +182,32 @@ contextBridge.exposeInMainWorld('electron', {
     // 获取页面数据 (RENDER_DATA)
     getPageData: () => ipcRenderer.invoke('douyin:get-page-data'),
 
+    // 获取当前视频发布信息 (作者、发布时间、点赞数、时长)
+    getVideoPublishInfo: () => ipcRenderer.invoke('douyin:get-video-publish-info'),
+    // 点击收藏按钮
+    clickFavorite: () => ipcRenderer.invoke('douyin:click-favorite'),
+    // 点击分享并复制链接
+    shareCopyLink: () => ipcRenderer.invoke('douyin:share-copy-link'),
+    // 连续采集推荐视频 (符合时间条件的视频)
+    collectRecommended: (options) => ipcRenderer.invoke('douyin:collect-recommended', options),
+
+    // 获取历史采集视频
+    getHistoryVideos: (options) => ipcRenderer.invoke('douyin:get-history-videos', options),
+    // 获取采集日期列表
+    getCollectionDates: () => ipcRenderer.invoke('douyin:get-collection-dates'),
+    // 删除单个视频记录
+    deleteVideo: (id) => ipcRenderer.invoke('douyin:delete-video', id),
+    // 清空所有历史视频
+    clearAllVideos: () => ipcRenderer.invoke('douyin:clear-all-videos'),
+
     // 监听采集进度
     onProgress: (callback) => {
       ipcRenderer.on('douyin:progress', (event, data) => callback(data))
+    },
+
+    // 监听推荐视频采集进度
+    onRecommendProgress: (callback) => {
+      ipcRenderer.on('douyin:recommend-progress', (event, data) => callback(data))
     },
 
     // 移除监听器

@@ -191,6 +191,32 @@ class DatabaseService {
       )
     `)
 
+    // 创建抖音采集视频表
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS douyin_collected_videos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        author_name TEXT,
+        publish_time TEXT,
+        like_count TEXT,
+        duration TEXT,
+        video_link TEXT,
+        short_link TEXT,
+        final_link TEXT,
+        favorited INTEGER DEFAULT 0,
+        account_id TEXT,
+        account_name TEXT,
+        collected_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `)
+
+    // 迁移：为 douyin_collected_videos 添加 short_link 和 final_link 字段
+    try {
+      this.db.exec(`ALTER TABLE douyin_collected_videos ADD COLUMN short_link TEXT`)
+    } catch (e) {}
+    try {
+      this.db.exec(`ALTER TABLE douyin_collected_videos ADD COLUMN final_link TEXT`)
+    } catch (e) {}
+
     // 创建上传日志表
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS upload_logs (
@@ -1251,6 +1277,121 @@ class DatabaseService {
       UPDATE ai_studio_usage_stats
       SET daily_count = 0, last_reset_date = ?, updated_at = CURRENT_TIMESTAMP
     `).run(currentPacificDate)
+  }
+
+  // ============ 抖音采集视频相关方法 ============
+
+  /**
+   * 保存采集的抖音视频
+   */
+  saveDouyinVideo(video) {
+    const stmt = this.db.prepare(`
+      INSERT INTO douyin_collected_videos
+      (author_name, publish_time, like_count, duration, video_link, short_link, final_link, favorited, account_id, account_name, collected_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `)
+    const result = stmt.run(
+      video.authorName || '',
+      video.publishTime || '',
+      video.likeCount || '',
+      video.duration || '',
+      video.videoLink || '',
+      video.shortLink || '',
+      video.finalLink || '',
+      video.favorited ? 1 : 0,
+      video.accountId || '',
+      video.accountName || '',
+      video.collectedAt || new Date().toISOString()
+    )
+    return result.lastInsertRowid
+  }
+
+  /**
+   * 批量保存采集的抖音视频
+   */
+  saveDouyinVideos(videos, accountId, accountName) {
+    const stmt = this.db.prepare(`
+      INSERT INTO douyin_collected_videos
+      (author_name, publish_time, like_count, duration, video_link, favorited, account_id, account_name, collected_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `)
+    const insertMany = this.db.transaction((items) => {
+      for (const video of items) {
+        stmt.run(
+          video.authorName || '',
+          video.publishTime || '',
+          video.likeCount || '',
+          video.duration || '',
+          video.videoLink || '',
+          video.favorited ? 1 : 0,
+          accountId || '',
+          accountName || '',
+          video.collectedAt || new Date().toISOString()
+        )
+      }
+    })
+    insertMany(videos)
+    return videos.length
+  }
+
+  /**
+   * 获取抖音采集视频列表
+   */
+  getDouyinVideos(options = {}) {
+    const { limit = 100, offset = 0, date } = options
+    let sql = `SELECT * FROM douyin_collected_videos`
+    const params = []
+
+    if (date) {
+      sql += ` WHERE DATE(collected_at) = DATE(?)`
+      params.push(date)
+    }
+
+    sql += ` ORDER BY collected_at DESC LIMIT ? OFFSET ?`
+    params.push(limit, offset)
+
+    return this.db.prepare(sql).all(...params)
+  }
+
+  /**
+   * 获取抖音采集视频总数
+   */
+  getDouyinVideoCount(date) {
+    let sql = `SELECT COUNT(*) as count FROM douyin_collected_videos`
+    const params = []
+
+    if (date) {
+      sql += ` WHERE DATE(collected_at) = DATE(?)`
+      params.push(date)
+    }
+
+    return this.db.prepare(sql).get(...params).count
+  }
+
+  /**
+   * 删除抖音采集视频
+   */
+  deleteDouyinVideo(id) {
+    return this.db.prepare(`DELETE FROM douyin_collected_videos WHERE id = ?`).run(id)
+  }
+
+  /**
+   * 清空所有抖音采集视频
+   */
+  clearDouyinVideos() {
+    return this.db.prepare(`DELETE FROM douyin_collected_videos`).run()
+  }
+
+  /**
+   * 获取抖音采集的日期列表 (用于筛选)
+   */
+  getDouyinCollectionDates() {
+    return this.db.prepare(`
+      SELECT DISTINCT DATE(collected_at) as date, COUNT(*) as count
+      FROM douyin_collected_videos
+      GROUP BY DATE(collected_at)
+      ORDER BY date DESC
+    `).all()
   }
 
   close() {
