@@ -23,7 +23,8 @@ const files = [
   'services/douyin.service.js',
   'services/scheduler.service.js',
   'services/youtube-upload.service.js',
-  'services/own-channel-scheduler.service.js'
+  'services/own-channel-scheduler.service.js',
+  'services/youtube.service.js'
 ]
 
 console.log('Fixing file encoding...')
