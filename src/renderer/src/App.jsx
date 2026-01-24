@@ -10,7 +10,8 @@ import {
   ClockCircleOutlined,
   UserOutlined,
   GlobalOutlined,
-  HistoryOutlined
+  HistoryOutlined,
+  YoutubeOutlined
 } from '@ant-design/icons'
 import HomePage from './pages/HomePage'
 import BrowserPage from './pages/BrowserPage'
@@ -19,6 +20,7 @@ import AIStudioAccountsPage from './pages/AIStudioAccountsPage'
 import SupabaseSettingsPage from './pages/SupabaseSettingsPage'
 import CommentaryTaskPage from './pages/CommentaryTaskPage'
 import DouyinPage from './pages/DouyinPage'
+import YouTubeCollectPage from './pages/YouTubeCollectPage'
 import SchedulerPage from './pages/SchedulerPage'
 import OwnChannelSchedulerPage from './pages/OwnChannelSchedulerPage'
 import CollectAccountPage from './pages/CollectAccountPage'
@@ -29,41 +31,20 @@ import OwnChannelCommentaryPage from './pages/OwnChannelCommentaryPage'
 const { Content, Sider } = Layout
 
 const App = () => {
-  const [currentPage, setCurrentPage] = useState('home')
+  const [currentPage, setCurrentPage] = useState('youtube-collect')
 
   const menuItems = [
     {
       type: 'group',
-      label: '自动发布',
+      label: 'Youtube刷对标',
       children: [
         {
-          key: 'home',
-          icon: <HomeOutlined />,
-          label: '视频文件'
+          key: 'youtube-collect',
+          icon: <YoutubeOutlined />,
+          label: 'YouTube视频采集'
         },
         {
-          key: 'browser',
-          icon: <ChromeOutlined />,
-          label: '发布账号管理'
-        },
-        {
-          key: 'upload-logs',
-          icon: <HistoryOutlined />,
-          label: '上传日志'
-        }
-      ]
-    },
-    {
-      type: 'group',
-      label: '抖音采集',
-      children: [
-        {
-          key: 'douyin',
-          icon: <VideoCameraOutlined />,
-          label: '视频采集'
-        },
-        {
-          key: 'collect-accounts',
+          key: 'youtube-collect-accounts',
           icon: <UserOutlined />,
           label: '采集账号管理'
         }
@@ -102,6 +83,43 @@ const App = () => {
     },
     {
       type: 'group',
+      label: '抖音采集',
+      children: [
+        {
+          key: 'douyin',
+          icon: <VideoCameraOutlined />,
+          label: '视频采集'
+        },
+        {
+          key: 'collect-accounts',
+          icon: <UserOutlined />,
+          label: '采集账号管理'
+        }
+      ]
+    },
+    {
+      type: 'group',
+      label: '自动发布',
+      children: [
+        {
+          key: 'home',
+          icon: <HomeOutlined />,
+          label: '视频文件'
+        },
+        {
+          key: 'browser',
+          icon: <ChromeOutlined />,
+          label: '发布账号管理'
+        },
+        {
+          key: 'upload-logs',
+          icon: <HistoryOutlined />,
+          label: '上传日志'
+        }
+      ]
+    },
+    {
+      type: 'group',
       label: '系统设置',
       children: [
         {
@@ -130,9 +148,13 @@ const App = () => {
       case 'upload-logs':
         return <UploadLogsPage />
       case 'collect-accounts':
-        return <CollectAccountPage />
+        return <CollectAccountPage platform="douyin" />
       case 'douyin':
         return <DouyinPage />
+      case 'youtube-collect':
+        return <YouTubeCollectPage />
+      case 'youtube-collect-accounts':
+        return <CollectAccountPage platform="youtube" />
       case 'commentary-tasks':
         return <CommentaryTaskPage />
       case 'own-channel-commentary-tasks':

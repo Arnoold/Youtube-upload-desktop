@@ -24,6 +24,7 @@ function setupIPC(mainWindow, services) {
   const aiStudioService = require('./services/aistudio.service')
   const clipboardLock = require('./services/clipboard-lock.service')
   const douyinService = require('./services/douyin.service')
+  const youtubeService = require('./services/youtube.service')
 
   try {
     fs.appendFileSync(logPath, `[${new Date().toISOString()}] Services required. Destructuring...\n`)
@@ -1232,7 +1233,9 @@ function setupIPC(mainWindow, services) {
 
   ipcMain.handle('collect-account:create', async (event, account) => {
     try {
+      console.log('[IPC] collect-account:create received:', JSON.stringify(account))
       const id = dbService.createCollectAccount(account)
+      console.log('[IPC] collect-account:create saved with id:', id)
       return { success: true, id }
     } catch (error) {
       console.error('collect-account:create error:', error)
@@ -2092,6 +2095,399 @@ function setupIPC(mainWindow, services) {
     } catch (error) {
       console.error('users:get-last-sync error:', error)
       return null
+    }
+  })
+
+  // ===== YouTube 采集相关 =====
+
+  ipcMain.handle('youtube-collect:launch-browser', async (event, browserId) => {
+    try {
+      // 根据 browserId 查找账号获取浏览器类型
+      const accounts = dbService.getCollectAccounts('youtube')
+      const account = accounts.find(a => a.bit_browser_id === browserId)
+      const browserType = account?.browser_type || 'hubstudio'
+
+      console.log('[YouTube Collect] Launch browser:', { browserId, browserType })
+
+      let browserResult
+      if (browserType === 'hubstudio') {
+        // 设置 HubStudio 凭证
+        const appId = dbService.getSetting('hubstudio_app_id')
+        const appSecret = dbService.getSetting('hubstudio_app_secret')
+        const groupCode = dbService.getSetting('hubstudio_group_code')
+
+        if (appId && appSecret) {
+          hubStudioService.setCredentials(appId, appSecret, groupCode)
+        }
+
+        browserResult = await hubStudioService.startBrowser(browserId)
+      } else {
+        // 使用比特浏览器
+        browserResult = await bitBrowserService.startBrowser(browserId)
+      }
+
+      console.log('[YouTube Collect] Browser start result:', browserResult)
+
+      if (!browserResult.success && browserResult.success !== undefined) {
+        return { success: false, error: browserResult.error || browserResult.msg || '启动浏览器失败' }
+      }
+
+      const wsEndpoint = browserResult.wsEndpoint || browserResult.ws
+      if (!wsEndpoint) {
+        return { success: false, error: '未获取到浏览器连接地址' }
+      }
+
+      // 使用 wsEndpoint 连接浏览器
+      return await youtubeService.connectWithWsEndpoint(wsEndpoint, browserId, browserType)
+    } catch (error) {
+      console.error('youtube-collect:launch-browser error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('youtube-collect:close-browser', async () => {
+    try {
+      // 获取当前浏览器信息以便正确关闭
+      const browserId = youtubeService.currentBrowserId
+      const browserType = youtubeService.currentBrowserType
+
+      // 先断开 Playwright 连接
+      const result = await youtubeService.closeBrowser()
+
+      // 如果是 BitBrowser，也调用 BitBrowser API 关闭
+      if (browserId && browserType === 'bitbrowser') {
+        try {
+          await bitBrowserService.closeBrowser(browserId)
+          console.log('[YouTube Collect] BitBrowser closed via API')
+        } catch (e) {
+          console.log('[YouTube Collect] Failed to close BitBrowser via API:', e.message)
+        }
+      }
+
+      return result
+    } catch (error) {
+      console.error('youtube-collect:close-browser error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('youtube-collect:get-status', async () => {
+    try {
+      return youtubeService.getStatus()
+    } catch (error) {
+      console.error('youtube-collect:get-status error:', error)
+      return { browserRunning: false, isCollecting: false, collectedCount: 0 }
+    }
+  })
+
+  ipcMain.handle('youtube-collect:open-youtube', async () => {
+    try {
+      return await youtubeService.openYouTube()
+    } catch (error) {
+      console.error('youtube-collect:open-youtube error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('youtube-collect:get-video-info', async () => {
+    try {
+      return await youtubeService.getCurrentVideoInfo()
+    } catch (error) {
+      console.error('youtube-collect:get-video-info error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('youtube-collect:get-home-videos', async () => {
+    try {
+      return await youtubeService.getHomeVideoList()
+    } catch (error) {
+      console.error('youtube-collect:get-home-videos error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('youtube-collect:get-current-shorts', async () => {
+    try {
+      return await youtubeService.getCurrentShortsInfo()
+    } catch (error) {
+      console.error('youtube-collect:get-current-shorts error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('youtube-collect:scroll-next', async () => {
+    try {
+      return await youtubeService.scrollToNextShorts()
+    } catch (error) {
+      console.error('youtube-collect:scroll-next error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('youtube-collect:collect-videos', async (event, options) => {
+    try {
+      return await youtubeService.collectVideos((progress) => {
+        mainWindow.webContents.send('youtube-collect:progress', progress)
+      }, options)
+    } catch (error) {
+      console.error('youtube-collect:collect-videos error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('youtube-collect:stop-collection', async () => {
+    try {
+      return youtubeService.stopCollection()
+    } catch (error) {
+      console.error('youtube-collect:stop-collection error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('youtube-collect:get-collected-videos', async () => {
+    try {
+      return youtubeService.getCollectedVideos()
+    } catch (error) {
+      console.error('youtube-collect:get-collected-videos error:', error)
+      return []
+    }
+  })
+
+  ipcMain.handle('youtube-collect:clear-collected-videos', async () => {
+    try {
+      return youtubeService.clearCollectedVideos()
+    } catch (error) {
+      console.error('youtube-collect:clear-collected-videos error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // 开始自动采集（带数据库保存）
+  ipcMain.handle('youtube-collect:start-auto-collect', async (event, options = {}) => {
+    try {
+      const { duration = 60, groupName = null } = options // 默认1小时
+      // TODO: 后续启用Supabase同步功能
+      // const BATCH_SIZE = 100 // 每100条批量保存到Supabase
+      // let supabaseBuffer = [] // 缓冲区
+
+      console.log('[IPC] Starting auto collect with duration:', duration, 'minutes, groupName:', groupName)
+
+      // 获取所有对标频道用于匹配
+      const allBenchmarkChannels = dbService.getBenchmarkChannels()
+      // 如果指定了分组，获取该分组的频道
+      const groupChannels = groupName ? dbService.getBenchmarkChannels(groupName) : []
+
+      console.log(`[IPC] Loaded ${allBenchmarkChannels.length} benchmark channels, ${groupChannels.length} in group "${groupName || 'none'}"`)
+
+      // TODO: 后续启用Supabase同步功能
+      // // 批量保存到Supabase的函数
+      // const flushToSupabase = async () => {
+      //   if (supabaseBuffer.length === 0) return
+      //   const videosToSave = [...supabaseBuffer]
+      //   supabaseBuffer = []
+      //   console.log(`[IPC] Batch saving ${videosToSave.length} videos to Supabase...`)
+      //   try {
+      //     const result = await supabaseService.saveYouTubeCollectedVideos(videosToSave)
+      //     if (result.success) {
+      //       console.log(`[IPC] Batch saved ${result.count || videosToSave.length} videos to Supabase`)
+      //     } else {
+      //       console.error('[IPC] Batch save to Supabase failed:', result.error)
+      //     }
+      //   } catch (err) {
+      //     console.error('[IPC] Batch save to Supabase error:', err.message)
+      //   }
+      // }
+
+      const result = await youtubeService.startAutoCollect({
+        duration,
+        groupName,
+        allBenchmarkChannels,
+        groupChannels,
+        onProgress: (progress) => {
+          // 发送进度到前端
+          mainWindow.webContents.send('youtube-collect:auto-progress', progress)
+        },
+        onSave: (video) => {
+          // 保存到本地数据库
+          const insertId = dbService.saveYoutubeVideo(video)
+          if (insertId) {
+            console.log('[IPC] Saved YouTube video to local DB:', video.videoId)
+            // TODO: 后续启用Supabase同步功能
+            // // 添加到Supabase缓冲区
+            // supabaseBuffer.push(video)
+            // // 达到批量大小时，异步批量保存到Supabase
+            // if (supabaseBuffer.length >= BATCH_SIZE) {
+            //   flushToSupabase()
+            // }
+            return true
+          } else {
+            // 视频已存在
+            return false
+          }
+        }
+      })
+
+      // TODO: 后续启用Supabase同步功能
+      // // 采集结束后，保存剩余的视频到Supabase
+      // await flushToSupabase()
+
+      return result
+    } catch (error) {
+      console.error('youtube-collect:start-auto-collect error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // 停止自动采集
+  ipcMain.handle('youtube-collect:stop-auto-collect', async () => {
+    try {
+      return youtubeService.stopAutoCollect()
+    } catch (error) {
+      console.error('youtube-collect:stop-auto-collect error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // 获取数据库中保存的 YouTube 视频列表
+  ipcMain.handle('youtube-collect:get-saved-videos', async (event, { limit = 100, offset = 0, date = null } = {}) => {
+    try {
+      const videos = dbService.getYoutubeVideos(limit, offset, date)
+      const total = dbService.getYoutubeVideoCount(date)
+      return { success: true, videos, total }
+    } catch (error) {
+      console.error('youtube-collect:get-saved-videos error:', error)
+      return { success: false, error: error.message, videos: [], total: 0 }
+    }
+  })
+
+  // 删除数据库中的 YouTube 视频
+  ipcMain.handle('youtube-collect:delete-saved-video', async (event, id) => {
+    try {
+      dbService.deleteYoutubeVideo(id)
+      return { success: true }
+    } catch (error) {
+      console.error('youtube-collect:delete-saved-video error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // 清空数据库中的 YouTube 视频
+  ipcMain.handle('youtube-collect:clear-saved-videos', async () => {
+    try {
+      dbService.clearYoutubeVideos()
+      return { success: true }
+    } catch (error) {
+      console.error('youtube-collect:clear-saved-videos error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // 获取 YouTube 采集日期列表
+  ipcMain.handle('youtube-collect:get-collection-dates', async () => {
+    try {
+      const dates = dbService.getYoutubeCollectionDates()
+      return { success: true, dates }
+    } catch (error) {
+      console.error('youtube-collect:get-collection-dates error:', error)
+      return { success: false, error: error.message, dates: [] }
+    }
+  })
+
+  // ========== 对标频道同步相关 IPC ==========
+
+  // 从 Supabase 同步对标频道数据到本地
+  ipcMain.handle('youtube-collect:sync-benchmark-from-supabase', async () => {
+    try {
+      console.log('[IPC] Starting sync benchmark data from Supabase...')
+
+      // 1. 获取分组数据
+      const groupsResult = await supabaseService.getBenchmarkChannelGroups()
+      if (!groupsResult.success) {
+        return { success: false, error: '获取分组数据失败: ' + groupsResult.error }
+      }
+
+      // 2. 获取频道数据
+      const channelsResult = await supabaseService.getBenchmarkChannels()
+      if (!channelsResult.success) {
+        return { success: false, error: '获取频道数据失败: ' + channelsResult.error }
+      }
+
+      // 3. 保存到本地数据库
+      const groupCount = dbService.saveBenchmarkChannelGroups(groupsResult.data)
+      const channelCount = dbService.saveBenchmarkChannels(channelsResult.data)
+
+      console.log(`[IPC] Synced ${groupCount} groups, ${channelCount} channels from Supabase`)
+
+      return {
+        success: true,
+        groupCount,
+        channelCount,
+        message: `同步完成：${groupCount} 个分组，${channelCount} 个频道`
+      }
+    } catch (error) {
+      console.error('youtube-collect:sync-benchmark-from-supabase error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // 获取本地对标频道分组
+  ipcMain.handle('youtube-collect:get-local-benchmark-groups', async () => {
+    try {
+      const groups = dbService.getBenchmarkChannelGroups()
+      return { success: true, groups }
+    } catch (error) {
+      console.error('youtube-collect:get-local-benchmark-groups error:', error)
+      return { success: false, error: error.message, groups: [] }
+    }
+  })
+
+  // 获取本地对标频道
+  ipcMain.handle('youtube-collect:get-local-benchmark-channels', async (event, groupName = null) => {
+    try {
+      const channels = dbService.getBenchmarkChannels(groupName)
+      return { success: true, channels }
+    } catch (error) {
+      console.error('youtube-collect:get-local-benchmark-channels error:', error)
+      return { success: false, error: error.message, channels: [] }
+    }
+  })
+
+  // 获取对标频道同步状态
+  ipcMain.handle('youtube-collect:get-benchmark-sync-status', async () => {
+    try {
+      const status = dbService.getBenchmarkSyncStatus()
+      return { success: true, ...status }
+    } catch (error) {
+      console.error('youtube-collect:get-benchmark-sync-status error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // 同步本地采集视频到Supabase
+  ipcMain.handle('youtube-collect:sync-to-supabase', async () => {
+    try {
+      console.log('[IPC] Starting sync local videos to Supabase...')
+
+      // 1. 获取所有本地采集的视频
+      const localVideos = dbService.getYoutubeVideos(10000, 0, null)
+      console.log(`[IPC] Found ${localVideos.length} local videos`)
+
+      if (localVideos.length === 0) {
+        return { success: true, synced: 0, skipped: 0, total: 0, message: '本地没有采集的视频' }
+      }
+
+      // 2. 同步到Supabase
+      const result = await supabaseService.syncLocalVideosToSupabase(localVideos, (progress) => {
+        // 发送进度到前端
+        mainWindow.webContents.send('youtube-collect:sync-to-supabase-progress', progress)
+      })
+
+      console.log('[IPC] Sync to Supabase result:', result)
+      return result
+    } catch (error) {
+      console.error('youtube-collect:sync-to-supabase error:', error)
+      return { success: false, error: error.message }
     }
   })
 

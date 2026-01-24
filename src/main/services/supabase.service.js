@@ -242,10 +242,16 @@ class SupabaseService {
       }
     }
 
-    // 日期范围筛选
+    // 发布时间范围筛选
     if (options.dateRange && options.dateRange.length === 2) {
       query = query.gte('published_at', options.dateRange[0])
         .lte('published_at', options.dateRange[1])
+    }
+
+    // 添加时间范围筛选（视频被采集到系统的时间）
+    if (options.createdAtRange && options.createdAtRange.length === 2) {
+      query = query.gte('created_at', options.createdAtRange[0])
+        .lte('created_at', options.createdAtRange[1])
     }
 
     // 最近N天筛选 (如果指定了 dateRange，则忽略 days)
@@ -680,6 +686,345 @@ class SupabaseService {
     }
 
     return data || []
+  }
+
+  /**
+   * 解析播放量字符串为数字
+   * @param {string} viewCount - 播放量字符串，如 "1.2M", "500K", "12,345"
+   * @returns {number} 数字格式的播放量
+   */
+  parseViewCount(viewCount) {
+    if (!viewCount) return 0
+    const str = String(viewCount).trim().toUpperCase()
+
+    // 处理 K/M/B 后缀
+    if (str.endsWith('K')) {
+      return Math.round(parseFloat(str.replace('K', '')) * 1000)
+    }
+    if (str.endsWith('M')) {
+      return Math.round(parseFloat(str.replace('M', '')) * 1000000)
+    }
+    if (str.endsWith('B')) {
+      return Math.round(parseFloat(str.replace('B', '')) * 1000000000)
+    }
+
+    // 处理中文单位
+    if (str.includes('万')) {
+      return Math.round(parseFloat(str.replace('万', '')) * 10000)
+    }
+    if (str.includes('亿')) {
+      return Math.round(parseFloat(str.replace('亿', '')) * 100000000)
+    }
+
+    // 去掉逗号和空格
+    const cleaned = str.replace(/[,\s]/g, '')
+    const num = parseInt(cleaned, 10)
+    return isNaN(num) ? 0 : num
+  }
+
+  /**
+   * 保存 YouTube 采集视频到 Supabase
+   * @param {Object} video - 视频数据
+   * @param {string} video.videoId - YouTube视频ID
+   * @param {string} video.videoUrl - 完整视频链接
+   * @param {string} video.title - 视频标题
+   * @param {string} video.channelHandle - 频道@ID
+   * @param {string} video.channelName - 频道名称
+   * @param {string} video.viewCount - 观看次数
+   * @param {string} video.publishDate - 发布时间
+   * @param {string} video.collectedAt - 采集时间
+   * @returns {Promise<Object>} 保存结果
+   */
+  async saveYouTubeCollectedVideo(video) {
+    if (!this.client) {
+      console.log('[Supabase] Client not initialized, skipping YouTube video save')
+      return { success: false, error: 'Supabase 未初始化' }
+    }
+
+    try {
+      const insertData = {
+        video_id: video.videoId,
+        video_url: video.videoUrl,
+        title: video.title,
+        channel_handle: video.channelHandle,
+        channel_name: video.channelName,
+        view_count: video.viewCount,
+        view_count_num: this.parseViewCount(video.viewCount),
+        publish_date: video.publishDate,
+        collected_at: video.collectedAt || new Date().toISOString(),
+        source: 'desktop',
+        status: 'pending'
+      }
+
+      const { data, error } = await this.client
+        .from('youtube_collected_videos')
+        .upsert(insertData, {
+          onConflict: 'video_id',
+          ignoreDuplicates: true
+        })
+        .select()
+
+      if (error) {
+        // 如果是重复键错误，不算失败
+        if (error.code === '23505' || error.message.includes('duplicate')) {
+          console.log('[Supabase] YouTube video already exists:', video.videoId)
+          return { success: true, duplicate: true }
+        }
+        console.error('[Supabase] Failed to save YouTube video:', error.message)
+        return { success: false, error: error.message }
+      }
+
+      console.log('[Supabase] Saved YouTube video:', video.videoId)
+      return { success: true, data }
+    } catch (err) {
+      console.error('[Supabase] Error saving YouTube video:', err.message)
+      return { success: false, error: err.message }
+    }
+  }
+
+  /**
+   * 批量保存 YouTube 采集视频到 Supabase
+   * @param {Array} videos - 视频数据数组
+   * @returns {Promise<Object>} 保存结果
+   */
+  async saveYouTubeCollectedVideos(videos) {
+    if (!this.client) {
+      console.log('[Supabase] Client not initialized, skipping YouTube videos save')
+      return { success: false, error: 'Supabase 未初始化' }
+    }
+
+    if (!videos || videos.length === 0) {
+      return { success: true, count: 0 }
+    }
+
+    try {
+      const insertData = videos.map(video => ({
+        // 所有采集字段（带 collected_ 前缀，区分于后续API字段）
+        collected_video_id: video.videoId || video.video_id,
+        collected_video_url: video.videoUrl || video.video_url,
+        collected_title: video.title,
+        collected_channel_handle: video.channelHandle || video.channel_handle,
+        collected_channel_name: video.channelName || video.channel_name,
+        collected_view_count: video.viewCount || video.view_count,
+        collected_view_count_num: this.parseViewCount(video.viewCount || video.view_count),
+        collected_publish_date: video.publishDate || video.publish_date,
+        collected_channel_url: video.channelUrl || video.channel_url || null,
+        collected_publish_time_type: video.publishTimeType || video.publish_time_type || null,
+        collected_video_duration: video.videoDuration || video.video_duration || null,
+        collected_video_duration_seconds: video.videoDurationSeconds || video.video_duration_seconds || 0,
+        collected_is_ad: video.isAd || video.is_ad || false,
+        collected_is_followed: video.isFollowed || video.is_followed || false,
+        collected_account_id: video.accountId || video.account_id || null,
+        collected_account_name: video.accountName || video.account_name || null,
+        // 系统字段
+        collected_at: video.collectedAt || video.collected_at || new Date().toISOString(),
+        source: 'desktop',
+        status: 'pending'
+      }))
+
+      const { data, error } = await this.client
+        .from('youtube_collected_videos')
+        .upsert(insertData, {
+          onConflict: 'collected_video_id',
+          ignoreDuplicates: true
+        })
+        .select()
+
+      if (error) {
+        console.error('[Supabase] Failed to save YouTube videos:', error.message)
+        return { success: false, error: error.message }
+      }
+
+      console.log('[Supabase] Saved', insertData.length, 'YouTube videos')
+      return { success: true, count: insertData.length, data }
+    } catch (err) {
+      console.error('[Supabase] Error saving YouTube videos:', err.message)
+      return { success: false, error: err.message }
+    }
+  }
+
+  /**
+   * 获取对标频道分组列表
+   */
+  async getBenchmarkChannelGroups() {
+    if (!this.client) {
+      console.log('[Supabase] Client not initialized')
+      return { success: false, error: 'Supabase 未初始化', data: [] }
+    }
+
+    try {
+      const { data, error } = await this.client
+        .from('benchmark_channel_groups')
+        .select('*')
+        .order('sort_order', { ascending: true })
+
+      if (error) {
+        console.error('[Supabase] Failed to get benchmark channel groups:', error.message)
+        return { success: false, error: error.message, data: [] }
+      }
+
+      console.log('[Supabase] Got', data.length, 'benchmark channel groups')
+      return { success: true, data }
+    } catch (err) {
+      console.error('[Supabase] Error getting benchmark channel groups:', err.message)
+      return { success: false, error: err.message, data: [] }
+    }
+  }
+
+  /**
+   * 获取对标频道列表
+   */
+  async getBenchmarkChannels() {
+    if (!this.client) {
+      console.log('[Supabase] Client not initialized')
+      return { success: false, error: 'Supabase 未初始化', data: [] }
+    }
+
+    try {
+      const { data, error } = await this.client
+        .from('benchmark_channels')
+        .select('id, channel_id, channel_name, title, thumbnail_url, channel_avatar, subscriber_count, video_count, view_count, total_views, country, description, published_at, custom_url, group_name, status, is_active, languages, weekly_video_count, weekly_view_count, monthly_video_count, monthly_view_count, rpm, remark, created_at, updated_at')
+        .eq('is_active', true)
+        .order('subscriber_count', { ascending: false })
+
+      if (error) {
+        console.error('[Supabase] Failed to get benchmark channels:', error.message)
+        return { success: false, error: error.message, data: [] }
+      }
+
+      console.log('[Supabase] Got', data.length, 'benchmark channels')
+      return { success: true, data }
+    } catch (err) {
+      console.error('[Supabase] Error getting benchmark channels:', err.message)
+      return { success: false, error: err.message, data: [] }
+    }
+  }
+
+  /**
+   * 获取Supabase中已存在的YouTube采集视频ID列表
+   * @param {Array<string>} videoIds - 要检查的视频ID数组
+   * @returns {Promise<Set<string>>} 已存在的视频ID集合
+   */
+  async getExistingYouTubeVideoIds(videoIds) {
+    if (!this.client) {
+      console.log('[Supabase] Client not initialized')
+      return new Set()
+    }
+
+    if (!videoIds || videoIds.length === 0) {
+      return new Set()
+    }
+
+    try {
+      // 分批查询，每批最多100个ID
+      const BATCH_SIZE = 100
+      const existingIds = new Set()
+
+      for (let i = 0; i < videoIds.length; i += BATCH_SIZE) {
+        const batch = videoIds.slice(i, i + BATCH_SIZE)
+        const { data, error } = await this.client
+          .from('youtube_collected_videos')
+          .select('collected_video_id')
+          .in('collected_video_id', batch)
+
+        if (error) {
+          console.error('[Supabase] Failed to check existing videos:', error.message)
+          continue
+        }
+
+        if (data) {
+          data.forEach(item => existingIds.add(item.collected_video_id))
+        }
+      }
+
+      console.log(`[Supabase] Found ${existingIds.size} existing videos out of ${videoIds.length}`)
+      return existingIds
+    } catch (err) {
+      console.error('[Supabase] Error checking existing videos:', err.message)
+      return new Set()
+    }
+  }
+
+  /**
+   * 同步本地YouTube采集视频到Supabase
+   * 只同步Supabase中不存在的视频
+   * @param {Array} localVideos - 本地视频数组
+   * @param {Function} onProgress - 进度回调
+   * @returns {Promise<Object>} 同步结果
+   */
+  async syncLocalVideosToSupabase(localVideos, onProgress) {
+    if (!this.client) {
+      return { success: false, error: 'Supabase 未初始化' }
+    }
+
+    if (!localVideos || localVideos.length === 0) {
+      return { success: true, synced: 0, skipped: 0, total: 0 }
+    }
+
+    try {
+      // 1. 获取所有本地视频ID
+      const localVideoIds = localVideos.map(v => v.video_id)
+
+      onProgress?.({ status: 'checking', message: '正在检查已存在的视频...' })
+
+      // 2. 查询Supabase中已存在的视频ID
+      const existingIds = await this.getExistingYouTubeVideoIds(localVideoIds)
+
+      // 3. 过滤出需要同步的视频
+      const videosToSync = localVideos.filter(v => !existingIds.has(v.video_id))
+
+      if (videosToSync.length === 0) {
+        return {
+          success: true,
+          synced: 0,
+          skipped: localVideos.length,
+          total: localVideos.length,
+          message: '所有视频已存在于Supabase中'
+        }
+      }
+
+      onProgress?.({
+        status: 'syncing',
+        message: `正在同步 ${videosToSync.length} 个新视频...`,
+        total: videosToSync.length
+      })
+
+      // 4. 分批上传（每批50个）
+      const BATCH_SIZE = 50
+      let syncedCount = 0
+      let errorCount = 0
+
+      for (let i = 0; i < videosToSync.length; i += BATCH_SIZE) {
+        const batch = videosToSync.slice(i, i + BATCH_SIZE)
+        const result = await this.saveYouTubeCollectedVideos(batch)
+
+        if (result.success) {
+          syncedCount += batch.length
+        } else {
+          errorCount += batch.length
+          console.error('[Supabase] Batch sync error:', result.error)
+        }
+
+        onProgress?.({
+          status: 'syncing',
+          message: `已同步 ${syncedCount}/${videosToSync.length}`,
+          synced: syncedCount,
+          total: videosToSync.length
+        })
+      }
+
+      return {
+        success: true,
+        synced: syncedCount,
+        skipped: existingIds.size,
+        failed: errorCount,
+        total: localVideos.length,
+        message: `同步完成：${syncedCount} 个新视频，${existingIds.size} 个已存在`
+      }
+    } catch (err) {
+      console.error('[Supabase] Sync error:', err.message)
+      return { success: false, error: err.message }
+    }
   }
 
   /**

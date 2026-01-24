@@ -191,6 +191,9 @@ class DatabaseService {
       )
     `)
 
+    // 迁移：为 collect_accounts 表添加 browser_type 字段
+    this.migrateCollectAccounts()
+
     // 创建抖音采集视频表
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS douyin_collected_videos (
@@ -279,6 +282,80 @@ class DatabaseService {
     // 迁移：为 upload_logs 表添加时区字段（必须在表创建之后）
     this.migrateUploadLogs()
 
+    // 创建 YouTube 采集视频表
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS youtube_collected_videos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        video_id TEXT NOT NULL UNIQUE,
+        video_url TEXT NOT NULL,
+        title TEXT,
+        channel_handle TEXT,
+        channel_name TEXT,
+        channel_url TEXT,
+        view_count TEXT,
+        publish_date TEXT,
+        publish_time_type TEXT,
+        video_duration TEXT,
+        video_duration_seconds INTEGER DEFAULT 0,
+        is_ad INTEGER DEFAULT 0,
+        is_followed INTEGER DEFAULT 0,
+        account_id TEXT,
+        account_name TEXT,
+        collected_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `)
+
+    // 迁移：为 youtube_collected_videos 表添加视频时长字段
+    this.migrateYoutubeCollectedVideos()
+
+    // 创建对标频道分组表（从Supabase同步）
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS benchmark_channel_groups (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        description TEXT,
+        color TEXT,
+        sort_order INTEGER DEFAULT 0,
+        channel_count INTEGER DEFAULT 0,
+        created_at DATETIME,
+        updated_at DATETIME,
+        synced_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `)
+
+    // 创建对标频道表（从Supabase同步）
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS benchmark_channels (
+        id INTEGER PRIMARY KEY,
+        channel_id TEXT NOT NULL UNIQUE,
+        channel_name TEXT NOT NULL,
+        title TEXT,
+        thumbnail_url TEXT,
+        channel_avatar TEXT,
+        subscriber_count INTEGER DEFAULT 0,
+        video_count INTEGER DEFAULT 0,
+        view_count INTEGER DEFAULT 0,
+        total_views INTEGER DEFAULT 0,
+        country TEXT,
+        description TEXT,
+        published_at TEXT,
+        custom_url TEXT,
+        group_name TEXT,
+        status TEXT DEFAULT 'active',
+        is_active INTEGER DEFAULT 1,
+        languages TEXT,
+        weekly_video_count INTEGER DEFAULT 0,
+        weekly_view_count INTEGER DEFAULT 0,
+        monthly_video_count INTEGER DEFAULT 0,
+        monthly_view_count INTEGER DEFAULT 0,
+        rpm REAL,
+        remark TEXT,
+        created_at DATETIME,
+        updated_at DATETIME,
+        synced_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `)
+
     console.log('Database tables created/verified')
   }
 
@@ -362,6 +439,17 @@ class DatabaseService {
     }
   }
 
+  migrateCollectAccounts() {
+    const columns = this.db.pragma('table_info(collect_accounts)')
+    const columnNames = columns.map(col => col.name)
+
+    // 添加 browser_type 字段（浏览器类型：hubstudio 或 bitbrowser）
+    if (!columnNames.includes('browser_type')) {
+      this.db.exec("ALTER TABLE collect_accounts ADD COLUMN browser_type TEXT DEFAULT 'hubstudio'")
+      console.log('Added browser_type column to collect_accounts')
+    }
+  }
+
   migrateUploadLogs() {
     const columns = this.db.pragma('table_info(upload_logs)')
     const columnNames = columns.map(col => col.name)
@@ -387,6 +475,23 @@ class DatabaseService {
     if (!columnNames.includes('total_success_count')) {
       this.db.exec('ALTER TABLE ai_studio_usage_stats ADD COLUMN total_success_count INTEGER DEFAULT 0')
       console.log('Added total_success_count column to ai_studio_usage_stats')
+    }
+  }
+
+  migrateYoutubeCollectedVideos() {
+    const columns = this.db.pragma('table_info(youtube_collected_videos)')
+    const columnNames = columns.map(col => col.name)
+
+    // 添加 video_duration 字段
+    if (!columnNames.includes('video_duration')) {
+      this.db.exec("ALTER TABLE youtube_collected_videos ADD COLUMN video_duration TEXT")
+      console.log('Added video_duration column to youtube_collected_videos')
+    }
+
+    // 添加 video_duration_seconds 字段
+    if (!columnNames.includes('video_duration_seconds')) {
+      this.db.exec('ALTER TABLE youtube_collected_videos ADD COLUMN video_duration_seconds INTEGER DEFAULT 0')
+      console.log('Added video_duration_seconds column to youtube_collected_videos')
     }
   }
 
@@ -751,16 +856,22 @@ class DatabaseService {
   // ===== 采集账号相关方法 =====
 
   createCollectAccount(account) {
+    console.log('[DB] createCollectAccount received:', JSON.stringify(account))
+    const browserType = account.browserType || 'hubstudio'
+    console.log('[DB] Using browserType:', browserType)
+
     const stmt = this.db.prepare(`
-      INSERT INTO collect_accounts (name, bit_browser_id, platform, remark)
-      VALUES (?, ?, ?, ?)
+      INSERT INTO collect_accounts (name, bit_browser_id, platform, browser_type, remark)
+      VALUES (?, ?, ?, ?, ?)
     `)
     const info = stmt.run(
       account.name,
       account.bitBrowserId,
       account.platform || 'douyin',
+      browserType,
       account.remark || ''
     )
+    console.log('[DB] createCollectAccount saved with id:', info.lastInsertRowid)
     return info.lastInsertRowid
   }
 
@@ -778,11 +889,12 @@ class DatabaseService {
   updateCollectAccount(id, account) {
     return this.db.prepare(`
       UPDATE collect_accounts
-      SET name = ?, bit_browser_id = ?, platform = ?, remark = ?, updated_at = CURRENT_TIMESTAMP
+      SET name = ?, bit_browser_id = ?, browser_type = ?, platform = ?, remark = ?, updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `).run(
       account.name,
       account.bitBrowserId,
+      account.browserType || 'hubstudio',
       account.platform || 'douyin',
       account.remark || '',
       id
@@ -1392,6 +1504,239 @@ class DatabaseService {
       GROUP BY DATE(collected_at)
       ORDER BY date DESC
     `).all()
+  }
+
+  // ==================== YouTube 采集视频相关方法 ====================
+
+  /**
+   * 保存 YouTube 采集视频（单条）
+   * @param {Object} video - 视频信息
+   * @returns {number|null} 插入的ID，如果已存在返回null
+   */
+  saveYoutubeVideo(video) {
+    try {
+      const stmt = this.db.prepare(`
+        INSERT OR IGNORE INTO youtube_collected_videos
+        (video_id, video_url, title, channel_handle, channel_name, channel_url, view_count, publish_date, publish_time_type, video_duration, video_duration_seconds, is_ad, is_followed, account_id, account_name, collected_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      const result = stmt.run(
+        video.videoId || '',
+        video.videoUrl || '',
+        video.title || '',
+        video.channelHandle || '',
+        video.channelName || '',
+        video.channelUrl || '',
+        video.viewCount || '',
+        video.publishDate || '',
+        video.publishTimeType || '',
+        video.videoDuration || '',
+        video.videoDurationSeconds || 0,
+        video.isAd ? 1 : 0,
+        video.isFollowed ? 1 : 0,
+        video.accountId || '',
+        video.accountName || '',
+        video.collectedAt || new Date().toISOString()
+      )
+      // changes 为 0 表示已存在（IGNORE）
+      return result.changes > 0 ? result.lastInsertRowid : null
+    } catch (error) {
+      console.error('Failed to save YouTube video:', error)
+      return null
+    }
+  }
+
+  /**
+   * 检查 YouTube 视频是否已采集
+   * @param {string} videoId - 视频ID
+   * @returns {boolean}
+   */
+  isYoutubeVideoCollected(videoId) {
+    const result = this.db.prepare(`
+      SELECT id FROM youtube_collected_videos WHERE video_id = ?
+    `).get(videoId)
+    return !!result
+  }
+
+  /**
+   * 获取 YouTube 采集视频列表
+   */
+  getYoutubeVideos(limit = 100, offset = 0, date = null) {
+    let sql = `SELECT * FROM youtube_collected_videos`
+    const params = []
+
+    if (date) {
+      sql += ` WHERE DATE(collected_at) = DATE(?)`
+      params.push(date)
+    }
+
+    sql += ` ORDER BY collected_at DESC LIMIT ? OFFSET ?`
+    params.push(limit, offset)
+
+    return this.db.prepare(sql).all(...params)
+  }
+
+  /**
+   * 获取 YouTube 采集视频总数
+   */
+  getYoutubeVideoCount(date = null) {
+    let sql = `SELECT COUNT(*) as count FROM youtube_collected_videos`
+    const params = []
+
+    if (date) {
+      sql += ` WHERE DATE(collected_at) = DATE(?)`
+      params.push(date)
+    }
+
+    return this.db.prepare(sql).get(...params).count
+  }
+
+  /**
+   * 删除 YouTube 采集视频
+   */
+  deleteYoutubeVideo(id) {
+    return this.db.prepare(`DELETE FROM youtube_collected_videos WHERE id = ?`).run(id)
+  }
+
+  /**
+   * 清空所有 YouTube 采集视频
+   */
+  clearYoutubeVideos() {
+    return this.db.prepare(`DELETE FROM youtube_collected_videos`).run()
+  }
+
+  /**
+   * 获取 YouTube 采集的日期列表 (用于筛选)
+   */
+  getYoutubeCollectionDates() {
+    return this.db.prepare(`
+      SELECT DISTINCT DATE(collected_at) as date, COUNT(*) as count
+      FROM youtube_collected_videos
+      GROUP BY DATE(collected_at)
+      ORDER BY date DESC
+    `).all()
+  }
+
+  // ========== 对标频道同步相关方法 ==========
+
+  /**
+   * 保存对标频道分组（批量upsert）
+   */
+  saveBenchmarkChannelGroups(groups) {
+    const stmt = this.db.prepare(`
+      INSERT OR REPLACE INTO benchmark_channel_groups
+      (id, name, description, color, sort_order, channel_count, created_at, updated_at, synced_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    `)
+
+    const insertMany = this.db.transaction((groups) => {
+      for (const group of groups) {
+        stmt.run(
+          group.id,
+          group.name,
+          group.description,
+          group.color,
+          group.sort_order || 0,
+          group.channel_count || 0,
+          group.created_at,
+          group.updated_at
+        )
+      }
+    })
+
+    insertMany(groups)
+    return groups.length
+  }
+
+  /**
+   * 获取本地对标频道分组
+   */
+  getBenchmarkChannelGroups() {
+    return this.db.prepare(`
+      SELECT * FROM benchmark_channel_groups ORDER BY sort_order ASC
+    `).all()
+  }
+
+  /**
+   * 保存对标频道（批量upsert）
+   */
+  saveBenchmarkChannels(channels) {
+    const stmt = this.db.prepare(`
+      INSERT OR REPLACE INTO benchmark_channels
+      (id, channel_id, channel_name, title, thumbnail_url, channel_avatar,
+       subscriber_count, video_count, view_count, total_views, country, description,
+       published_at, custom_url, group_name, status, is_active, languages,
+       weekly_video_count, weekly_view_count, monthly_video_count, monthly_view_count,
+       rpm, remark, created_at, updated_at, synced_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    `)
+
+    const insertMany = this.db.transaction((channels) => {
+      for (const ch of channels) {
+        stmt.run(
+          ch.id,
+          ch.channel_id,
+          ch.channel_name,
+          ch.title,
+          ch.thumbnail_url,
+          ch.channel_avatar,
+          ch.subscriber_count || 0,
+          ch.video_count || 0,
+          ch.view_count || 0,
+          ch.total_views || 0,
+          ch.country,
+          ch.description,
+          ch.published_at,
+          ch.custom_url,
+          ch.group_name,
+          ch.status || 'active',
+          ch.is_active ? 1 : 0,
+          ch.languages,
+          ch.weekly_video_count || 0,
+          ch.weekly_view_count || 0,
+          ch.monthly_video_count || 0,
+          ch.monthly_view_count || 0,
+          ch.rpm,
+          ch.remark,
+          ch.created_at,
+          ch.updated_at
+        )
+      }
+    })
+
+    insertMany(channels)
+    return channels.length
+  }
+
+  /**
+   * 获取本地对标频道
+   */
+  getBenchmarkChannels(groupName = null) {
+    if (groupName) {
+      return this.db.prepare(`
+        SELECT * FROM benchmark_channels WHERE group_name = ? ORDER BY subscriber_count DESC
+      `).all(groupName)
+    }
+    return this.db.prepare(`
+      SELECT * FROM benchmark_channels ORDER BY subscriber_count DESC
+    `).all()
+  }
+
+  /**
+   * 获取对标频道同步状态
+   */
+  getBenchmarkSyncStatus() {
+    const groupCount = this.db.prepare(`SELECT COUNT(*) as count FROM benchmark_channel_groups`).get()
+    const channelCount = this.db.prepare(`SELECT COUNT(*) as count FROM benchmark_channels`).get()
+    const lastSync = this.db.prepare(`
+      SELECT MAX(synced_at) as last_synced FROM benchmark_channels
+    `).get()
+
+    return {
+      groupCount: groupCount?.count || 0,
+      channelCount: channelCount?.count || 0,
+      lastSynced: lastSync?.last_synced
+    }
   }
 
   close() {

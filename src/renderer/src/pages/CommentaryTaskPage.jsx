@@ -231,11 +231,17 @@ const CreateTaskView = ({ onTaskCreated }) => {
                 sortBy: 'published_at',
                 sortOrder: 'desc'
             }
-            if (values.dateRange && values.dateRange.length === 2) {
-                baseOptions.dateRange = [
-                    values.dateRange[0].startOf('day').toISOString(),
-                    values.dateRange[1].endOf('day').toISOString()
+            // 时间筛选（根据选择的时间类型）
+            if (values.timeRange && values.timeRange.length === 2) {
+                const timeRangeValue = [
+                    values.timeRange[0].startOf('day').toISOString(),
+                    values.timeRange[1].endOf('day').toISOString()
                 ]
+                if (values.timeType === 'created_at') {
+                    baseOptions.createdAtRange = timeRangeValue
+                } else {
+                    baseOptions.dateRange = timeRangeValue
+                }
             }
 
             // 自动分页获取所有视频
@@ -319,7 +325,8 @@ const CreateTaskView = ({ onTaskCreated }) => {
 
     // 默认筛选值
     const defaultFilterValues = {
-        dateRange: [
+        timeType: 'published_at', // 默认按发布时间筛选
+        timeRange: [
             dayjs().subtract(4, 'day'), // 开始时间：往前推4天
             dayjs().add(1, 'day')       // 结束时间：往后推1天
         ],
@@ -362,18 +369,28 @@ const CreateTaskView = ({ onTaskCreated }) => {
                     </Col>
                 </Row>
                 <Row gutter={16} align="middle">
-                    <Col span={7}>
-                        <Form.Item name="dateRange" label="发布时间">
-                            <RangePicker style={{ width: '100%' }} />
+                    <Col span={8}>
+                        <Form.Item>
+                            <Space.Compact style={{ width: '100%' }}>
+                                <Form.Item name="timeType" noStyle>
+                                    <Select style={{ width: 100 }}>
+                                        <Option value="published_at">发布时间</Option>
+                                        <Option value="created_at">添加时间</Option>
+                                    </Select>
+                                </Form.Item>
+                                <Form.Item name="timeRange" noStyle>
+                                    <RangePicker style={{ flex: 1 }} />
+                                </Form.Item>
+                            </Space.Compact>
                         </Form.Item>
                     </Col>
                     <Col span={5}>
                         <Form.Item label="最小播放量">
-                            <Space.Compact style={{ width: '100%', minWidth: 120 }}>
+                            <Space.Compact style={{ width: '100%', minWidth: 100 }}>
                                 <Form.Item name="minViews" noStyle>
                                     <InputNumber
                                         placeholder="如：200"
-                                        style={{ width: '100%', minWidth: 80 }}
+                                        style={{ width: '100%', minWidth: 60 }}
                                         min={0}
                                     />
                                 </Form.Item>
@@ -381,7 +398,7 @@ const CreateTaskView = ({ onTaskCreated }) => {
                             </Space.Compact>
                         </Form.Item>
                     </Col>
-                    <Col span={5} style={{ paddingLeft: 16 }}>
+                    <Col span={5}>
                         <Form.Item name="generationStatus" label="生成状态">
                             <Select placeholder="全部" allowClear mode="multiple" maxTagCount={2} style={{ width: '100%' }}>
                                 <Option value="pending_all">待生成</Option>
@@ -391,7 +408,7 @@ const CreateTaskView = ({ onTaskCreated }) => {
                             </Select>
                         </Form.Item>
                     </Col>
-                    <Col span={7} style={{ textAlign: 'right' }}>
+                    <Col span={6} style={{ textAlign: 'right' }}>
                         <Form.Item>
                             <Button type="primary" htmlType="submit" icon={<SearchOutlined />} loading={loading} size="large">
                                 预览筛选结果
@@ -409,11 +426,11 @@ const CreateTaskView = ({ onTaskCreated }) => {
                     icon={<PlusOutlined />}
                     onClick={() => {
                         // 生成默认任务名称，包含日期范围
-                        const dateRange = form.getFieldValue('dateRange')
+                        const timeRange = form.getFieldValue('timeRange')
                         let taskName = `任务 ${dayjs().format('MM-DD HH:mm')}`
-                        if (dateRange && dateRange.length === 2) {
-                            const startDate = dateRange[0].format('MM-DD')
-                            const endDate = dateRange[1].format('MM-DD')
+                        if (timeRange && timeRange.length === 2) {
+                            const startDate = timeRange[0].format('MM-DD')
+                            const endDate = timeRange[1].format('MM-DD')
                             taskName = `任务 ${startDate} ~ ${endDate}`
                         }
                         createForm.setFieldsValue({ taskName })

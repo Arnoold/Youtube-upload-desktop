@@ -337,6 +337,81 @@ contextBridge.exposeInMainWorld('electron', {
     getCached: () => ipcRenderer.invoke('users:get-cached'),
     getByName: (name) => ipcRenderer.invoke('users:get-by-name', name),
     getLastSync: () => ipcRenderer.invoke('users:get-last-sync')
+  },
+
+  // YouTube 视频采集
+  youtubeCollect: {
+    // 启动浏览器
+    launchBrowser: (browserId) => ipcRenderer.invoke('youtube-collect:launch-browser', browserId),
+    // 关闭浏览器
+    closeBrowser: () => ipcRenderer.invoke('youtube-collect:close-browser'),
+    // 获取状态
+    getStatus: () => ipcRenderer.invoke('youtube-collect:get-status'),
+    // 打开 YouTube
+    openYouTube: () => ipcRenderer.invoke('youtube-collect:open-youtube'),
+    // 获取当前视频信息
+    getVideoInfo: () => ipcRenderer.invoke('youtube-collect:get-video-info'),
+    // 获取当前 Shorts 视频信息
+    getCurrentShorts: () => ipcRenderer.invoke('youtube-collect:get-current-shorts'),
+    // 滑动到下一个 Shorts 视频
+    scrollNext: () => ipcRenderer.invoke('youtube-collect:scroll-next'),
+    // 获取首页视频列表
+    getHomeVideos: () => ipcRenderer.invoke('youtube-collect:get-home-videos'),
+    // 采集视频
+    collectVideos: (options) => ipcRenderer.invoke('youtube-collect:collect-videos', options),
+    // 停止采集
+    stopCollection: () => ipcRenderer.invoke('youtube-collect:stop-collection'),
+    // 获取已采集的视频
+    getCollectedVideos: () => ipcRenderer.invoke('youtube-collect:get-collected-videos'),
+    // 清空已采集的视频
+    clearCollectedVideos: () => ipcRenderer.invoke('youtube-collect:clear-collected-videos'),
+
+    // ==================== 自动采集相关 ====================
+    // 开始自动采集（保存到数据库）
+    startAutoCollect: (options) => ipcRenderer.invoke('youtube-collect:start-auto-collect', options),
+    // 停止自动采集
+    stopAutoCollect: () => ipcRenderer.invoke('youtube-collect:stop-auto-collect'),
+    // 获取数据库中保存的视频
+    getSavedVideos: (options) => ipcRenderer.invoke('youtube-collect:get-saved-videos', options),
+    // 删除数据库中的视频
+    deleteSavedVideo: (id) => ipcRenderer.invoke('youtube-collect:delete-saved-video', id),
+    // 清空数据库中的视频
+    clearSavedVideos: () => ipcRenderer.invoke('youtube-collect:clear-saved-videos'),
+    // 获取采集日期列表
+    getCollectionDates: () => ipcRenderer.invoke('youtube-collect:get-collection-dates'),
+
+    // 监听采集进度
+    onProgress: (callback) => {
+      ipcRenderer.on('youtube-collect:progress', (event, data) => callback(data))
+    },
+
+    // 监听自动采集进度
+    onAutoProgress: (callback) => {
+      ipcRenderer.on('youtube-collect:auto-progress', (event, data) => callback(data))
+    },
+
+    // 移除监听器
+    removeListener: (channel) => {
+      ipcRenderer.removeAllListeners(channel)
+    },
+
+    // ==================== 对标频道同步相关 ====================
+    // 从 Supabase 同步对标频道数据
+    syncBenchmarkFromSupabase: () => ipcRenderer.invoke('youtube-collect:sync-benchmark-from-supabase'),
+    // 获取本地对标频道分组
+    getLocalBenchmarkGroups: () => ipcRenderer.invoke('youtube-collect:get-local-benchmark-groups'),
+    // 获取本地对标频道
+    getLocalBenchmarkChannels: (groupName) => ipcRenderer.invoke('youtube-collect:get-local-benchmark-channels', groupName),
+    // 获取同步状态
+    getBenchmarkSyncStatus: () => ipcRenderer.invoke('youtube-collect:get-benchmark-sync-status'),
+
+    // ==================== 采集视频同步到Supabase ====================
+    // 同步本地采集视频到Supabase
+    syncToSupabase: () => ipcRenderer.invoke('youtube-collect:sync-to-supabase'),
+    // 监听同步进度
+    onSyncToSupabaseProgress: (callback) => {
+      ipcRenderer.on('youtube-collect:sync-to-supabase-progress', (event, data) => callback(data))
+    }
   }
 })
 
