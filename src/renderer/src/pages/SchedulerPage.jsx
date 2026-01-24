@@ -25,6 +25,8 @@ const SchedulerPage = () => {
         { value: 'generating', label: '生成中' },
         { value: 'completed', label: '已完成' },
         { value: 'failed', label: '失败' },
+        { value: 'video_error', label: '视频异常' },
+        { value: 'video_deleted', label: '视频删除' },
         { value: 'all', label: '全部' }
     ]
     const [logs, setLogs] = useState([])

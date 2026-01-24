@@ -85,6 +85,18 @@ function setupIPC(mainWindow, services) {
     }
   })
 
+  // 打开外部链接（在默认浏览器中打开）
+  ipcMain.handle('shell:openExternal', async (event, url) => {
+    try {
+      const { shell } = require('electron')
+      await shell.openExternal(url)
+      return { success: true }
+    } catch (error) {
+      console.error('shell:openExternal error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
   // ===== 比特浏览器相关 =====
 
   ipcMain.handle('browser:test', async () => {

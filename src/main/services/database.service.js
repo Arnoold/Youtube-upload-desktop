@@ -215,10 +215,10 @@ class DatabaseService {
     // 迁移：为 douyin_collected_videos 添加 short_link 和 final_link 字段
     try {
       this.db.exec(`ALTER TABLE douyin_collected_videos ADD COLUMN short_link TEXT`)
-    } catch (e) {}
+    } catch (e) { }
     try {
       this.db.exec(`ALTER TABLE douyin_collected_videos ADD COLUMN final_link TEXT`)
-    } catch (e) {}
+    } catch (e) { }
 
     // 创建上传日志表
     this.db.exec(`
@@ -787,7 +787,9 @@ class DatabaseService {
         SUM(CASE WHEN status = 'failed' OR status = 'error' THEN 1 ELSE 0 END) as failed,
         SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
         SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as processing,
-        SUM(CASE WHEN status = 'video_deleted' THEN 1 ELSE 0 END) as video_deleted
+        SUM(CASE WHEN status = 'video_deleted' THEN 1 ELSE 0 END) as video_deleted,
+        SUM(CASE WHEN status = 'video_error' THEN 1 ELSE 0 END) as video_error,
+        SUM(CASE WHEN status = 'timeout' THEN 1 ELSE 0 END) as timeout
       FROM commentary_task_items
       WHERE task_id = ?
     `).get(taskId)
@@ -798,7 +800,9 @@ class DatabaseService {
       failed: stats.failed || 0,
       pending: stats.pending || 0,
       processing: stats.processing || 0,
-      video_deleted: stats.video_deleted || 0
+      video_deleted: stats.video_deleted || 0,
+      video_error: stats.video_error || 0,
+      timeout: stats.timeout || 0
     }
   }
 
@@ -813,7 +817,9 @@ class DatabaseService {
         SUM(CASE WHEN i.status = 'failed' OR i.status = 'error' THEN 1 ELSE 0 END) as failed,
         SUM(CASE WHEN i.status = 'pending' THEN 1 ELSE 0 END) as pending,
         SUM(CASE WHEN i.status = 'processing' THEN 1 ELSE 0 END) as processing,
-        SUM(CASE WHEN i.status = 'video_deleted' THEN 1 ELSE 0 END) as video_deleted
+        SUM(CASE WHEN i.status = 'video_deleted' THEN 1 ELSE 0 END) as video_deleted,
+        SUM(CASE WHEN i.status = 'video_error' THEN 1 ELSE 0 END) as video_error,
+        SUM(CASE WHEN i.status = 'timeout' THEN 1 ELSE 0 END) as timeout
       FROM commentary_tasks t
       LEFT JOIN commentary_task_items i ON t.id = i.task_id
       GROUP BY t.id
@@ -834,7 +840,9 @@ class DatabaseService {
         failed: task.failed || 0,
         pending: task.pending || 0,
         processing: task.processing || 0,
-        video_deleted: task.video_deleted || 0
+        video_deleted: task.video_deleted || 0,
+        video_error: task.video_error || 0,
+        timeout: task.timeout || 0
       }
     }))
   }
@@ -1234,7 +1242,9 @@ class DatabaseService {
         SUM(CASE WHEN status = 'failed' OR status = 'error' THEN 1 ELSE 0 END) as failed,
         SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
         SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as processing,
-        SUM(CASE WHEN status = 'video_deleted' THEN 1 ELSE 0 END) as video_deleted
+        SUM(CASE WHEN status = 'video_deleted' THEN 1 ELSE 0 END) as video_deleted,
+        SUM(CASE WHEN status = 'video_error' THEN 1 ELSE 0 END) as video_error,
+        SUM(CASE WHEN status = 'timeout' THEN 1 ELSE 0 END) as timeout
       FROM own_channel_task_items
       WHERE task_id = ?
     `).get(taskId)
@@ -1245,7 +1255,9 @@ class DatabaseService {
       failed: stats.failed || 0,
       pending: stats.pending || 0,
       processing: stats.processing || 0,
-      video_deleted: stats.video_deleted || 0
+      video_deleted: stats.video_deleted || 0,
+      video_error: stats.video_error || 0,
+      timeout: stats.timeout || 0
     }
   }
 
@@ -1264,7 +1276,9 @@ class DatabaseService {
           SUM(CASE WHEN status = 'failed' OR status = 'error' THEN 1 ELSE 0 END) as failed,
           SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
           SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as processing,
-          SUM(CASE WHEN status = 'video_deleted' THEN 1 ELSE 0 END) as video_deleted
+          SUM(CASE WHEN status = 'video_deleted' THEN 1 ELSE 0 END) as video_deleted,
+          SUM(CASE WHEN status = 'video_error' THEN 1 ELSE 0 END) as video_error,
+          SUM(CASE WHEN status = 'timeout' THEN 1 ELSE 0 END) as timeout
         FROM own_channel_task_items
         WHERE task_id = ?
       `).get(task.id)
@@ -1272,7 +1286,7 @@ class DatabaseService {
       return {
         ...task,
         filters: JSON.parse(task.filters || '{}'),
-        stats: stats || { total: 0, completed: 0, failed: 0, pending: 0, processing: 0, video_deleted: 0 }
+        stats: stats || { total: 0, completed: 0, failed: 0, pending: 0, processing: 0, video_deleted: 0, video_error: 0, timeout: 0 }
       }
     })
   }
@@ -1307,6 +1321,38 @@ class DatabaseService {
       SET status = ?, result = ?, error = ?, updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `).run(status, result ? JSON.stringify(result) : null, error, id)
+  }
+
+  /**
+   * 重置解说词任务中卡住的 processing 状态为 timeout
+   * 用于任务结束时清理未正确完成的 item
+   * @param {number} taskId - 任务 ID
+   * @returns {number} - 重置的记录数
+   */
+  resetStuckCommentaryTaskItems(taskId) {
+    const result = this.db.prepare(`
+      UPDATE commentary_task_items
+      SET status = 'timeout', error = '任务超时未完成', updated_at = CURRENT_TIMESTAMP
+      WHERE task_id = ? AND status = 'processing'
+    `).run(taskId)
+    console.log(`[DatabaseService] 重置解说词任务 ${taskId} 中 ${result.changes} 个卡住的 processing 状态`)
+    return result.changes
+  }
+
+  /**
+   * 重置自有频道任务中卡住的 processing 状态为 timeout
+   * 用于任务结束时清理未正确完成的 item
+   * @param {number} taskId - 任务 ID
+   * @returns {number} - 重置的记录数
+   */
+  resetStuckOwnChannelTaskItems(taskId) {
+    const result = this.db.prepare(`
+      UPDATE own_channel_task_items
+      SET status = 'timeout', error = '任务超时未完成', updated_at = CURRENT_TIMESTAMP
+      WHERE task_id = ? AND status = 'processing'
+    `).run(taskId)
+    console.log(`[DatabaseService] 重置自有频道任务 ${taskId} 中 ${result.changes} 个卡住的 processing 状态`)
+    return result.changes
   }
 
   /**

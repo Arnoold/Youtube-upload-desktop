@@ -46,7 +46,9 @@ const STATUS_MAP = {
     'failed': '失败',
     'cancelled': '已取消',
     'error': '错误',
-    'video_deleted': '视频已删除'
+    'video_deleted': '视频已删除',
+    'video_error': '视频异常',
+    'timeout': '已超时'
 }
 
 const STATUS_COLOR_MAP = {
@@ -56,7 +58,9 @@ const STATUS_COLOR_MAP = {
     'failed': 'error',
     'cancelled': 'warning',
     'error': 'error',
-    'video_deleted': 'warning'
+    'video_deleted': 'warning',
+    'video_error': 'orange',
+    'timeout': 'volcano'
 }
 
 const CommentaryTaskPage = () => {
@@ -405,6 +409,8 @@ const CreateTaskView = ({ onTaskCreated }) => {
                                 <Option value="generating">生成中</Option>
                                 <Option value="completed">已完成</Option>
                                 <Option value="failed">失败</Option>
+                                <Option value="video_error">视频异常</Option>
+                                <Option value="video_deleted">视频删除</Option>
                             </Select>
                         </Form.Item>
                     </Col>
@@ -473,7 +479,7 @@ const CreateTaskView = ({ onTaskCreated }) => {
 const TaskExecutionView = ({ taskId, onBack }) => {
     const [task, setTask] = useState(null)
     const [items, setItems] = useState([])
-    const [stats, setStats] = useState({ total: 0, completed: 0, failed: 0, pending: 0, processing: 0, video_deleted: 0 })
+    const [stats, setStats] = useState({ total: 0, completed: 0, failed: 0, pending: 0, processing: 0, video_deleted: 0, video_error: 0 })
     const [loading, setLoading] = useState(false)
     const [browserProfiles, setBrowserProfiles] = useState([])
     const [selectedProfiles, setSelectedProfiles] = useState([]) // 改为数组，支持多选
@@ -710,11 +716,21 @@ const TaskExecutionView = ({ taskId, onBack }) => {
         return () => window.electron.aiStudio.removeListener('aistudio:progress')
     }, [taskId])
 
-    const handleStart = async () => {
+    const handleStart = async (forceStart = false) => {
         if (!selectedProfiles || selectedProfiles.length === 0) {
             message.warning('请选择至少一个执行账号')
             return
         }
+
+        // 如果是强制启动，先重置状态
+        if (forceStart) {
+            try {
+                await window.electron.aiStudio.forceReset()
+            } catch (e) {
+                console.error('Force reset failed:', e)
+            }
+        }
+
         setProcessing(true)
         setWorkerProgress({}) // 清空工作进度
         try {
@@ -725,8 +741,25 @@ const TaskExecutionView = ({ taskId, onBack }) => {
                 message.success('任务已启动')
             }
         } catch (error) {
-            message.error('启动失败: ' + error.message)
-            setProcessing(false)
+            // 检查是否是任务冲突错误
+            if (error.message && error.message.includes('已有任务正在处理中')) {
+                Modal.confirm({
+                    title: '任务冲突',
+                    content: '当前已有任务正在执行中，是否强制结束之前的任务并启动新任务？',
+                    okText: '强制执行',
+                    okType: 'danger',
+                    cancelText: '取消',
+                    onOk: () => {
+                        handleStart(true) // 强制启动
+                    },
+                    onCancel: () => {
+                        setProcessing(false)
+                    }
+                })
+            } else {
+                message.error('启动失败: ' + error.message)
+                setProcessing(false)
+            }
         }
     }
 
@@ -754,7 +787,29 @@ const TaskExecutionView = ({ taskId, onBack }) => {
 
     const itemColumns = [
         { title: 'ID', dataIndex: 'video_id', width: 80, render: (id) => id ? Math.floor(id) : '-' },
-        { title: '标题', dataIndex: 'video_info', render: info => info?.title || '-' },
+        {
+            title: '标题',
+            dataIndex: 'video_info',
+            ellipsis: true,
+            render: info => {
+                const title = info?.title || '-'
+                const url = info?.url || (info?.video_id ? `https://www.youtube.com/watch?v=${info.video_id}` : null)
+                if (url) {
+                    return (
+                        <a
+                            onClick={(e) => {
+                                e.preventDefault()
+                                window.electron.shell.openExternal(url)
+                            }}
+                            style={{ cursor: 'pointer', color: '#1890ff' }}
+                        >
+                            {title}
+                        </a>
+                    )
+                }
+                return title
+            }
+        },
         {
             title: '状态',
             dataIndex: 'status',
@@ -844,6 +899,10 @@ const TaskExecutionView = ({ taskId, onBack }) => {
                             <div style={{ textAlign: 'center' }}>
                                 <div style={{ fontSize: 24, fontWeight: 'bold', color: '#faad14' }}>{stats.video_deleted || 0}</div>
                                 <div style={{ fontSize: 12, color: '#666' }}>已删除</div>
+                            </div>
+                            <div style={{ textAlign: 'center' }}>
+                                <div style={{ fontSize: 24, fontWeight: 'bold', color: '#fa8c16' }}>{stats.video_error || 0}</div>
+                                <div style={{ fontSize: 12, color: '#666' }}>视频异常</div>
                             </div>
                             <div style={{ textAlign: 'center' }}>
                                 <div style={{ fontSize: 24, fontWeight: 'bold', color: '#722ed1' }}>{stats.processing}</div>
@@ -1122,7 +1181,7 @@ const HistoryTab = ({ onLoadTask, isActive }) => {
             key: 'progress',
             width: 280,
             render: (_, record) => {
-                const stats = record.stats || { total: 0, completed: 0, failed: 0, pending: 0, processing: 0, video_deleted: 0 }
+                const stats = record.stats || { total: 0, completed: 0, failed: 0, pending: 0, processing: 0, video_deleted: 0, video_error: 0 }
                 const progressPercent = stats.total > 0 ? Math.round((stats.completed / stats.total) * 100) : 0
                 return (
                     <div>
@@ -1131,6 +1190,7 @@ const HistoryTab = ({ onLoadTask, isActive }) => {
                             <Tag color="success">成功: {stats.completed}</Tag>
                             <Tag color="error">失败: {stats.failed}</Tag>
                             {stats.video_deleted > 0 && <Tag color="warning">已删除: {stats.video_deleted}</Tag>}
+                            {stats.video_error > 0 && <Tag color="orange">视频异常: {stats.video_error}</Tag>}
                             <Tag color="default">待执行: {stats.pending}</Tag>
                             {stats.processing > 0 && <Tag color="processing">执行中: {stats.processing}</Tag>}
                         </div>

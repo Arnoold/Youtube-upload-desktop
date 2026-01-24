@@ -57,17 +57,17 @@ const App = () => {
         {
           key: 'commentary-tasks',
           icon: <FileTextOutlined />,
-          label: '解说词任务'
+          label: '对标解说词任务'
+        },
+        {
+          key: 'scheduler',
+          icon: <ClockCircleOutlined />,
+          label: '对标定时任务'
         },
         {
           key: 'own-channel-commentary-tasks',
           icon: <FileTextOutlined />,
           label: '自有频道解说词'
-        },
-        {
-          key: 'scheduler',
-          icon: <ClockCircleOutlined />,
-          label: '定时任务'
         },
         {
           key: 'own-channel-scheduler',

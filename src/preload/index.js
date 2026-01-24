@@ -16,6 +16,11 @@ contextBridge.exposeInMainWorld('electron', {
     openFile: (filePath) => ipcRenderer.invoke('file:open', filePath)
   },
 
+  // Shell 操作
+  shell: {
+    openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url)
+  },
+
   // 浏览器管理 (支持 BitBrowser 和 HubStudio)
   browser: {
     test: () => ipcRenderer.invoke('browser:test'),

@@ -185,6 +185,107 @@ class AIStudioService {
   }
 
   /**
+   * 打开视频链接检测是否存在 YouTube 视频错误或异常状态
+   * 用于识别版权限制、地区限制、不公开/私人视频等情况
+   * @param {Page} page - Playwright 页面对象
+   * @param {string} videoUrl - 视频链接
+   * @returns {Promise<{hasError: boolean, reason: string, subreason: string}>}
+   */
+  async checkYouTubeVideoError(page, videoUrl) {
+    try {
+      console.log(`[AIStudio] 正在打开视频链接检测错误: ${videoUrl}`)
+
+      // 在当前页面打开视频链接
+      await page.goto(videoUrl, { waitUntil: 'domcontentloaded', timeout: 15000 })
+      await page.waitForTimeout(3000) // 等待页面完全加载
+
+      // 1. 检测 YouTube 官方错误消息渲染器 (yt-player-error-message-renderer)
+      const errorRenderer = page.locator('yt-player-error-message-renderer')
+
+      if (await errorRenderer.isVisible({ timeout: 3000 })) {
+        // 提取主要错误原因
+        let reason = ''
+        let subreason = ''
+
+        try {
+          const reasonElement = page.locator('yt-player-error-message-renderer #reason')
+          if (await reasonElement.isVisible({ timeout: 500 })) {
+            reason = await reasonElement.textContent() || ''
+          }
+        } catch (e) {
+          // 忽略
+        }
+
+        try {
+          const subreasonElement = page.locator('yt-player-error-message-renderer #subreason')
+          if (await subreasonElement.isVisible({ timeout: 500 })) {
+            subreason = await subreasonElement.textContent() || ''
+          }
+        } catch (e) {
+          // 忽略
+        }
+
+        console.log(`[AIStudio] 检测到 YouTube 视频错误: ${reason} - ${subreason}`)
+        return {
+          hasError: true,
+          reason: reason.trim(),
+          subreason: subreason.trim()
+        }
+      }
+
+      // 2. 检测视频隐私状态标识 (不公开/私人)
+      // 使用 badge-shape 元素检测，aria-label 或 .yt-badge-shape__text 包含隐私状态
+      try {
+        const badgeElements = page.locator('badge-shape.yt-badge-shape')
+        const count = await badgeElements.count()
+
+        for (let i = 0; i < count; i++) {
+          const badge = badgeElements.nth(i)
+          const ariaLabel = await badge.getAttribute('aria-label') || ''
+          let badgeText = ''
+
+          try {
+            const textElement = badge.locator('.yt-badge-shape__text')
+            if (await textElement.isVisible({ timeout: 300 })) {
+              badgeText = await textElement.textContent() || ''
+            }
+          } catch (e) {
+            // 忽略
+          }
+
+          const labelToCheck = ariaLabel || badgeText
+
+          // 检测不公开/私人状态（支持多语言）
+          // 中文：不公开、私享、私人
+          // 英文：Unlisted、Private
+          const privatePatterns = ['不公开', '私享', '私人', 'unlisted', 'private']
+          const isPrivateVideo = privatePatterns.some(pattern =>
+            labelToCheck.toLowerCase().includes(pattern.toLowerCase())
+          )
+
+          if (isPrivateVideo) {
+            console.log(`[AIStudio] 检测到视频隐私状态: ${labelToCheck}`)
+            return {
+              hasError: true,
+              reason: labelToCheck.trim(),
+              subreason: '视频为不公开或私人状态'
+            }
+          }
+        }
+      } catch (e) {
+        // 忽略检测失败
+        console.log('[AIStudio] 隐私状态检测失败:', e.message)
+      }
+
+      return { hasError: false, reason: '', subreason: '' }
+    } catch (e) {
+      console.error('[AIStudio] 检测视频错误时出错:', e.message)
+      // 出错时不影响原流程
+      return { hasError: false, reason: '', subreason: '' }
+    }
+  }
+
+  /**
    * 根据浏览器类型获取对应的浏览器服务
    * @param {string} browserType - 'bitbrowser' 或 'hubstudio'
    */
@@ -360,7 +461,7 @@ class AIStudioService {
           }
 
           // 其他错误：正常处理
-          const status = error.isVideoDeleted ? 'video_deleted' : 'failed'
+          const status = error.isVideoDeleted ? 'video_deleted' : (error.isVideoError ? 'video_error' : 'failed')
           if (taskType === 'own_channel') {
             this.dbService.updateOwnChannelTaskItemStatus(item.id, status, null, error.message)
           } else {
@@ -481,7 +582,15 @@ class AIStudioService {
       // 4. 等待所有工作线程完成
       await Promise.all(workerPromises)
 
-      // 5. 任务结束
+      // 5. 清理任务中所有卡住的 processing 状态（防止 worker 异常退出导致状态未更新）
+      console.log(`[AIStudio] 任务结束前清理卡住的 processing 状态...`)
+      if (taskType === 'own_channel') {
+        this.dbService.resetStuckOwnChannelTaskItems(taskId)
+      } else {
+        this.dbService.resetStuckCommentaryTaskItems(taskId)
+      }
+
+      // 6. 任务结束
       if (this.shouldStop) {
         // 用户手动停止了任务
         if (taskType === 'own_channel') {
@@ -514,10 +623,14 @@ class AIStudioService {
 
     } catch (error) {
       console.error('Parallel task execution failed:', error)
+      // 清理任务中所有卡住的 processing 状态
+      console.log(`[AIStudio] 任务出错，清理卡住的 processing 状态...`)
       if (taskType === 'own_channel') {
+        this.dbService.resetStuckOwnChannelTaskItems(taskId)
         this.dbService.updateOwnChannelTaskStatus(taskId, 'error')
         this.dbService.updateOwnChannelTaskEndTime(taskId)
       } else {
+        this.dbService.resetStuckCommentaryTaskItems(taskId)
         this.dbService.updateCommentaryTaskStatus(taskId, 'error')
         this.dbService.updateCommentaryTaskFinishTime(taskId)
       }
@@ -679,8 +792,8 @@ class AIStudioService {
           }
 
           // 其他错误：正常处理
-          const status = error.isVideoDeleted ? 'video_deleted' : 'failed'
-          const statusText = error.isVideoDeleted ? '视频已删除' : '失败'
+          const status = error.isVideoDeleted ? 'video_deleted' : (error.isVideoError ? 'video_error' : 'failed')
+          const statusText = error.isVideoDeleted ? '视频已删除' : (error.isVideoError ? '视频异常' : '失败')
           if (taskType === 'own_channel') {
             this.dbService.updateOwnChannelTaskItemStatus(item.id, status, null, error.message)
           } else {
@@ -693,15 +806,15 @@ class AIStudioService {
             taskId: taskId,
             workerId: workerId,
             videoId: video.id,
-            status: error.isVideoDeleted ? 'video_deleted' : 'error',
+            status: error.isVideoDeleted ? 'video_deleted' : (error.isVideoError ? 'video_error' : 'error'),
             current: getCompleted(),
             total: total,
             error: error.message,
             message: `[${workerId}] ${statusText}: ${video.title} - ${error.message}`
           })
 
-          // 失败后短暂等待再继续（视频已删除则不需要等太久）
-          await new Promise(resolve => setTimeout(resolve, error.isVideoDeleted ? 1000 : 3000))
+          // 失败后短暂等待再继续（视频已删除/视频异常则不需要等太久）
+          await new Promise(resolve => setTimeout(resolve, (error.isVideoDeleted || error.isVideoError) ? 1000 : 3000))
         }
       }
     } finally {
@@ -724,6 +837,7 @@ class AIStudioService {
     let playwrightBrowserId = null
     let browserService = null
     let browserType = 'bitbrowser'
+    let page = null  // 在外部声明，以便 catch 块中可以访问
 
     try {
       // Step 1: 更新状态为 generating
@@ -765,7 +879,7 @@ class AIStudioService {
       progressCallback({ step: 4, progress: 30, message: '打开 AI Studio...' })
 
       const existingPages = context.pages()
-      let page = existingPages.length > 0 ? existingPages[0] : await context.newPage()
+      page = existingPages.length > 0 ? existingPages[0] : await context.newPage()
 
       await page.goto('https://aistudio.google.com/prompts/new_chat', {
         waitUntil: 'domcontentloaded',
@@ -1092,7 +1206,7 @@ class AIStudioService {
           }
         } catch (e) {
           // 如果是我们主动抛出的错误，继续抛出
-          if (e.message && (e.message.includes('AI Studio 内部错误') || e.message.includes('AI Studio 速率限制'))) {
+          if (e.message && (e.message.includes('AI Studio 内部错误') || e.message.includes('AI Studio 速率限制') || e.isVideoError)) {
             throw e
           }
           // 其他错误（如元素未找到）忽略
@@ -1347,8 +1461,31 @@ class AIStudioService {
     } catch (error) {
       console.error(`[${workerId}] Process video failed:`, error)
 
+      // 检测特定错误时，打开视频链接检查是否是视频异常
+      const needsVideoCheck = error.message &&
+        (error.message.includes('AI Studio 内部错误') || error.message.includes('无法获取 AI 回复内容'))
+
+      if (needsVideoCheck && page) {
+        try {
+          console.log(`[${workerId}] 检测到可能的视频问题，正在打开视频链接检测...`)
+          const videoUrl = video.url || video.video_url || `https://www.youtube.com/watch?v=${video.video_id}`
+          const ytError = await this.checkYouTubeVideoError(page, videoUrl)
+
+          if (ytError.hasError) {
+            // 更新错误信息为视频异常
+            error.isVideoError = true
+            error.message = `视频异常: ${ytError.reason}${ytError.subreason ? ' - ' + ytError.subreason : ''}`
+            console.log(`[${workerId}] ✓ 确认为视频异常: ${error.message}`)
+          }
+        } catch (e) {
+          console.error(`[${workerId}] 视频错误检测失败:`, e.message)
+        }
+      }
+
       try {
-        await supabaseService.updateStatus(video.id, 'failed', error.message, { tableName: options.tableName })
+        // 区分视频已删除、视频异常和普通失败状态
+        const status = error.isVideoDeleted ? 'video_deleted' : (error.isVideoError ? 'video_error' : 'failed')
+        await supabaseService.updateStatus(video.id, status, error.message, { tableName: options.tableName })
       } catch (e) {
         console.error('Failed to update status:', e)
       }
@@ -1409,6 +1546,7 @@ class AIStudioService {
     let playwrightBrowserId = null
     let browserService = null
     let browserType = 'bitbrowser'
+    let page = null  // 在外部声明，以便 catch 块中可以访问
 
     try {
       // Step 1: 更新状态为 generating
@@ -1447,7 +1585,6 @@ class AIStudioService {
       const existingPages = context.pages()
       console.log('[AIStudio] Existing pages count:', existingPages.length)
 
-      let page = null
       if (existingPages.length > 0) {
         page = existingPages[0]
         console.log('[AIStudio] Using existing page')
@@ -1996,9 +2133,31 @@ class AIStudioService {
         }
       }
 
-      // 更新状态为失败
+      // 检测特定错误时，打开视频链接检查是否是视频异常
+      const needsVideoCheck = error.message &&
+        (error.message.includes('AI Studio 内部错误') || error.message.includes('无法获取 AI 回复内容'))
+
+      if (needsVideoCheck && page) {
+        try {
+          console.log('[AIStudio] 检测到可能的视频问题，正在打开视频链接检测...')
+          const videoUrl = video.url || video.video_url || `https://www.youtube.com/watch?v=${video.video_id}`
+          const ytError = await this.checkYouTubeVideoError(page, videoUrl)
+
+          if (ytError.hasError) {
+            // 更新错误信息为视频异常
+            error.isVideoError = true
+            error.message = `视频异常: ${ytError.reason}${ytError.subreason ? ' - ' + ytError.subreason : ''}`
+            console.log('[AIStudio] ✓ 确认为视频异常:', error.message)
+          }
+        } catch (e) {
+          console.error('[AIStudio] 视频错误检测失败:', e.message)
+        }
+      }
+
+      // 更新状态为失败（区分视频已删除、视频异常和普通失败）
       try {
-        await supabaseService.updateStatus(video.id, 'failed', error.message, { tableName: options.tableName })
+        const status = error.isVideoDeleted ? 'video_deleted' : (error.isVideoError ? 'video_error' : 'failed')
+        await supabaseService.updateStatus(video.id, status, error.message, { tableName: options.tableName })
       } catch (e) {
         console.error('Failed to update status:', e)
       }
