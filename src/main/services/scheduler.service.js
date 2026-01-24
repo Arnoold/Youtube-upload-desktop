@@ -165,6 +165,10 @@ class SchedulerService {
         return
       }
 
+      // 立即更新 lastExecuteKey，防止在60秒等待期间再次触发
+      this.config.lastExecuteKey = executeKey
+      await this.saveConfig()
+
       console.log('[Scheduler] 到达执行时间，开始执行定时任务')
       this.addLog('info', `到达执行时间 ${this.config.executeTime}，开始执行定时任务`)
       await this.executeTask()
@@ -186,6 +190,83 @@ class SchedulerService {
 
     try {
       const { dbService, supabaseService, aiStudioService } = this.services
+
+      // 检查是否有其他任务正在执行，如果有则强制结束
+      if (aiStudioService.isProcessing) {
+        this.addLog('warning', '检测到有其他任务正在执行，正在强制结束...')
+        console.log('[Scheduler] 检测到有其他任务正在执行，强制重置状态')
+        aiStudioService.forceReset()
+
+        // 主动关闭所有浏览器，避免前端异步关闭操作与新任务冲突
+        this.addLog('info', '正在关闭所有浏览器...')
+        const { hubStudioService, bitBrowserService } = this.services
+
+        try {
+          // 获取所有活跃的浏览器账号
+          const accounts = dbService.getAIStudioAccounts()
+          const hubStudioIds = accounts.filter(a => a.browser_type === 'hubstudio').map(a => a.bit_browser_id)
+          const bitBrowserIds = accounts.filter(a => a.browser_type !== 'hubstudio').map(a => a.bit_browser_id)
+
+          // 并行关闭所有浏览器
+          const closePromises = []
+          if (hubStudioIds.length > 0 && hubStudioService) {
+            closePromises.push(hubStudioService.closeAllBrowsers(hubStudioIds).catch(e => console.log('[Scheduler] 关闭HubStudio失败:', e.message)))
+          }
+          if (bitBrowserIds.length > 0 && bitBrowserService) {
+            closePromises.push(bitBrowserService.closeAllBrowsers(bitBrowserIds).catch(e => console.log('[Scheduler] 关闭BitBrowser失败:', e.message)))
+          }
+          await Promise.all(closePromises)
+          this.addLog('info', '已发送关闭浏览器指令')
+
+          // 智能等待：轮询检查浏览器状态，直到所有浏览器都关闭
+          const maxWaitTime = 120000 // 最长等待120秒
+          const checkInterval = 5000 // 每5秒检查一次
+          const startWaitTime = Date.now()
+          let allClosed = false
+
+          while (!allClosed && (Date.now() - startWaitTime) < maxWaitTime) {
+            await new Promise(resolve => setTimeout(resolve, checkInterval))
+            const elapsed = Math.round((Date.now() - startWaitTime) / 1000)
+
+            // 检查 HubStudio 浏览器状态
+            let hubStudioAllClosed = true
+            if (hubStudioIds.length > 0 && hubStudioService) {
+              try {
+                const statusResult = await hubStudioService.getBatchBrowserStatus(hubStudioIds)
+                if (statusResult.success) {
+                  const activeCount = Object.values(statusResult.data).filter(s => s === 'Active').length
+                  hubStudioAllClosed = activeCount === 0
+                  if (!hubStudioAllClosed) {
+                    this.addLog('info', `等待浏览器关闭... ${elapsed}秒 (还有${activeCount}个运行中)`)
+                    console.log(`[Scheduler] HubStudio 还有 ${activeCount} 个浏览器运行中`)
+                  }
+                }
+              } catch (e) {
+                console.log('[Scheduler] 检查HubStudio状态失败:', e.message)
+              }
+            }
+
+            allClosed = hubStudioAllClosed
+
+            if (allClosed) {
+              this.addLog('info', `所有浏览器已确认关闭 (用时${elapsed}秒)`)
+              console.log(`[Scheduler] 所有浏览器已确认关闭，用时 ${elapsed} 秒`)
+            }
+          }
+
+          if (!allClosed) {
+            this.addLog('warning', `等待超时(120秒)，部分浏览器可能仍在运行，继续执行任务`)
+            console.log('[Scheduler] 等待浏览器关闭超时，继续执行任务')
+          }
+
+        } catch (e) {
+          console.log('[Scheduler] 关闭浏览器时出错:', e.message)
+          this.addLog('warning', '关闭浏览器时出错，等待30秒后继续')
+          await new Promise(resolve => setTimeout(resolve, 30000))
+        }
+
+        this.addLog('info', '开始执行定时任务')
+      }
 
       // 通知前端任务开始
       this.notifyStatus({ status: 'running', step: 'start', message: '定时任务开始执行...' })
