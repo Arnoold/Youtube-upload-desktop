@@ -192,7 +192,7 @@ const CreateTaskView = ({ onTaskCreated }) => {
         try {
             const values = await form.validateFields()
             const baseOptions = {
-                limit: 200, // 每页200条，减少单次查询量避免超时
+                limit: 100, // 每页100条，减少单次查询量避免超时
                 // 播放量输入的是"万"，需要乘以10000
                 minViews: values.minViews ? values.minViews * 10000 : undefined,
                 // Gemini生成状态筛选（支持多选）

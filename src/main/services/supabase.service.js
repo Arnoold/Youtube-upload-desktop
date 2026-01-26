@@ -208,9 +208,12 @@ class SupabaseService {
     }
 
     // const tableName = options.tableName || this.config.tableName // Moved up
+    // 使用 estimated 而不是 exact 来加速计数
+    // exact 需要扫描整个表，在大表上非常慢
+    const countType = options.exactCount ? 'exact' : 'estimated'
     let query = this.client
       .from(tableName)
-      .select(selectFields, { count: 'exact' })
+      .select(selectFields, { count: countType })
 
     // 生成状态筛选（支持多选）
     if (options.statusList && options.statusList.length > 0) {
@@ -259,6 +262,12 @@ class SupabaseService {
       const startDate = new Date()
       startDate.setDate(startDate.getDate() - options.days)
       query = query.gte('published_at', startDate.toISOString())
+    } else if (!options.dateRange && !options.createdAtRange && !isOwnChannel) {
+      // 没有指定任何时间范围时，默认只查询最近90天的数据，避免全表扫描
+      const defaultStartDate = new Date()
+      defaultStartDate.setDate(defaultStartDate.getDate() - 90)
+      query = query.gte('published_at', defaultStartDate.toISOString())
+      console.log('[Supabase] 未指定时间范围，默认查询最近90天数据')
     }
 
     // 最小播放量筛选
@@ -297,8 +306,8 @@ class SupabaseService {
     const sortOrder = options.sortOrder === 'asc' ? true : false
     query = query.order(sortBy, { ascending: sortOrder })
 
-    // 分页 (最大500条，避免查询过慢)
-    const limit = Math.min(options.limit || 20, 500)
+    // 分页 (最大100条，避免查询过慢超时)
+    const limit = Math.min(options.limit || 20, 100)
     const page = options.page || 1
     const offset = (page - 1) * limit
 
