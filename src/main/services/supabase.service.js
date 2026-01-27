@@ -157,15 +157,11 @@ class SupabaseService {
           'created_at', 'updated_at'
         ].join(',')
       } else {
-        // 对标视频表字段
+        // 对标视频表字段 - 精简到最小必需，避免查询超时
         selectFields = [
           'id', 'video_id', 'channel_id', 'title',
-          'channel_name', 'channel_avatar', 'published_at', 'duration',
-          'thumbnail', 'url', 'view_count', 'like_count', 'comment_count',
-          'group_name', 'tags', 'generation_status', 'script_generated_at',
-          'script_generation_error', 'created_at', 'updated_at',
-          // 只包含小字段用于预览
-          'video_description'
+          'channel_name', 'published_at',
+          'view_count', 'generation_status'
         ].join(',')
       }
     }
@@ -208,12 +204,11 @@ class SupabaseService {
     }
 
     // const tableName = options.tableName || this.config.tableName // Moved up
-    // 使用 estimated 而不是 exact 来加速计数
-    // exact 需要扫描整个表，在大表上非常慢
-    const countType = options.exactCount ? 'exact' : 'estimated'
+    // 完全禁用 count 查询，因为它会导致超时
+    // 前端将通过分页加载的方式判断是否还有更多数据
     let query = this.client
       .from(tableName)
-      .select(selectFields, { count: countType })
+      .select(selectFields)
 
     // 生成状态筛选（支持多选）
     if (options.statusList && options.statusList.length > 0) {
@@ -306,8 +301,8 @@ class SupabaseService {
     const sortOrder = options.sortOrder === 'asc' ? true : false
     query = query.order(sortBy, { ascending: sortOrder })
 
-    // 分页 (最大100条，避免查询过慢超时)
-    const limit = Math.min(options.limit || 20, 100)
+    // 分页 (最奇50条，避免查询超时)
+    const limit = Math.min(options.limit || 20, 50)
     const page = options.page || 1
     const offset = (page - 1) * limit
 
@@ -320,7 +315,7 @@ class SupabaseService {
       query = query.range(offset, offset + limit - 1)
     }
 
-    const { data, error, count } = await query
+    const { data, error } = await query
 
     if (error) {
       throw new Error(error.message)
@@ -342,7 +337,8 @@ class SupabaseService {
 
     return {
       data: data || [],
-      total: count || 0,
+      // 不再返回 total，前端通过判断 data.length < limit 来确定是否有更多数据
+      total: -1,
       page,
       pageSize: limit
     }

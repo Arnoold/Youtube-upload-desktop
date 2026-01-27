@@ -225,7 +225,7 @@ const CreateTaskView = ({ onTaskCreated }) => {
         try {
             const values = await form.validateFields()
             const baseOptions = {
-                limit: 100, // 每页100条，减少单次查询量避免超时
+                limit: 50, // 每页50条，减少单次查询量避免超时
                 // 播放量输入的是"万"，需要乘以10000
                 minViews: values.minViews ? values.minViews * 10000 : undefined,
                 groupName: values.group,
@@ -256,15 +256,14 @@ const CreateTaskView = ({ onTaskCreated }) => {
             while (true) {
                 const result = await window.electron.supabase.getVideos({ ...baseOptions, page })
                 allVideos = allVideos.concat(result.data)
-                total = result.total
 
                 // 显示加载进度
-                if (total > baseOptions.limit) {
-                    message.loading({ content: `正在加载... ${allVideos.length}/${total}`, key: 'loadingVideos', duration: 0 })
+                if (allVideos.length > 0 && result.data.length === baseOptions.limit) {
+                    message.loading({ content: `正在加载... 已获取 ${allVideos.length} 条`, key: 'loadingVideos', duration: 0 })
                 }
 
                 // 如果获取的数据少于 limit，说明已经是最后一页
-                if (result.data.length < baseOptions.limit || allVideos.length >= total) {
+                if (result.data.length < baseOptions.limit) {
                     break
                 }
                 page++
@@ -277,7 +276,7 @@ const CreateTaskView = ({ onTaskCreated }) => {
 
             message.destroy('loadingVideos')
             setVideos(allVideos)
-            message.success(`找到 ${total} 个视频，已加载 ${allVideos.length} 条`)
+            message.success(`已加载 ${allVideos.length} 条视频`)
         } catch (error) {
             message.destroy('loadingVideos')
             message.error(`加载失败: ${error.message}`)
@@ -300,9 +299,9 @@ const CreateTaskView = ({ onTaskCreated }) => {
                 name: values.taskName,
                 filters: filterValues,
                 items: videos.map(v => ({
-                    video_id: v.id,
-                    id: v.id,
-                    url: v.url,
+                    video_id: v.video_id, // 使用 YouTube 视频 ID，不是数据库主键
+                    id: v.id, // 数据库主键 ID，用于在 Supabase 中更新状态
+                    url: v.url || `https://www.youtube.com/watch?v=${v.video_id}`, // 如果没有 url 字段，手动构建
                     title: v.title
                 }))
             }
