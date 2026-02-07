@@ -864,6 +864,209 @@ class YouTubeService {
   }
 
   /**
+   * 重新加载 Shorts 页面（页面卡住时使用）
+   */
+  async reloadShortsPage() {
+    if (!this.page) return
+
+    try {
+      console.log('[YouTube] Reloading Shorts page...')
+      await this.page.goto('https://www.youtube.com/shorts', { waitUntil: 'domcontentloaded', timeout: 15000 })
+      await this.page.waitForTimeout(3000)
+      console.log('[YouTube] Shorts page reloaded, current URL:', this.page.url())
+    } catch (error) {
+      console.error('[YouTube] Failed to reload Shorts page:', error.message)
+      // 如果 goto 失败，尝试刷新当前页面
+      try {
+        await this.page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 })
+        await this.page.waitForTimeout(3000)
+        console.log('[YouTube] Page refreshed instead')
+      } catch (e) {
+        console.error('[YouTube] Page refresh also failed:', e.message)
+      }
+    }
+  }
+
+  /**
+   * 从 Hashtag 页面采集 Shorts 视频ID和播放量
+   * @param {Object} options
+   * @param {string} options.hashtagUrl - Hashtag 页面 URL
+   * @param {Function} options.onProgress - 进度回调
+   * @param {Function} options.onSave - 保存回调
+   * @returns {Promise<Object>} 采集结果
+   */
+  async collectFromHashtag(options = {}) {
+    const { hashtagUrl, onProgress, onSave } = options
+
+    if (!this.page) {
+      return { success: false, error: '浏览器未启动' }
+    }
+
+    if (this.isCollecting || this.isRunning) {
+      return { success: false, error: '已有采集任务正在运行' }
+    }
+
+    if (!hashtagUrl || !hashtagUrl.includes('/hashtag/')) {
+      return { success: false, error: '请输入有效的 Hashtag URL' }
+    }
+
+    this.isCollecting = true
+    const startTime = Date.now()
+    const collectedVideos = new Map() // videoId -> { videoId, viewCount }
+    let lastCount = 0
+    let noNewCount = 0 // 连续没有新视频的滚动次数
+
+    try {
+      // 导航到 hashtag 页面
+      console.log('[YouTube] Navigating to hashtag page:', hashtagUrl)
+      onProgress?.({ type: 'status', message: '正在打开标签页...' })
+      await this.page.goto(hashtagUrl, { waitUntil: 'domcontentloaded', timeout: 30000 })
+      await this.page.waitForTimeout(3000)
+
+      // 确保在 Shorts 标签下
+      const currentUrl = this.page.url()
+      if (!currentUrl.includes('/shorts')) {
+        // 尝试点击 Shorts 标签
+        try {
+          await this.page.click('yt-tab-shape[tab-title="Shorts"]')
+          await this.page.waitForTimeout(2000)
+        } catch (e) {
+          console.log('[YouTube] Could not click Shorts tab, may already be on it')
+        }
+      }
+
+      console.log('[YouTube] Starting to scroll and collect from hashtag page...')
+      onProgress?.({ type: 'status', message: '开始滚动加载视频...' })
+
+      // 不断滚动直到没有更多新视频
+      while (this.isCollecting) {
+        // 提取当前页面上所有 shorts 链接
+        const videos = await this.page.evaluate(() => {
+          const items = document.querySelectorAll('ytd-rich-item-renderer')
+          const result = []
+          items.forEach(item => {
+            const link = item.querySelector('a[href*="/shorts/"]')
+            if (!link) return
+            const href = link.getAttribute('href')
+            const videoId = href?.match(/\/shorts\/([a-zA-Z0-9_-]+)/)?.[1]
+            if (!videoId) return
+
+            // 获取观看次数
+            const spans = item.querySelectorAll('span')
+            let viewText = ''
+            spans.forEach(s => {
+              const t = s.textContent.trim()
+              if (t.includes('次观看') || t.includes('views')) {
+                viewText = t
+              }
+            })
+
+            // 解析观看次数为实际数字
+            // 中文格式: "170万次观看", "2169万次观看", "1.5亿次观看"
+            // 英文格式: "1.7M views", "500K views", "1B views"
+            let viewCount = 0
+            if (viewText) {
+              const num = parseFloat(viewText.replace(/,/g, ''))
+              if (!isNaN(num)) {
+                if (viewText.includes('亿')) {
+                  viewCount = Math.round(num * 100000000)
+                } else if (viewText.includes('万')) {
+                  viewCount = Math.round(num * 10000)
+                } else if (viewText.toUpperCase().includes('B')) {
+                  viewCount = Math.round(num * 1000000000)
+                } else if (viewText.toUpperCase().includes('M')) {
+                  viewCount = Math.round(num * 1000000)
+                } else if (viewText.toUpperCase().includes('K')) {
+                  viewCount = Math.round(num * 1000)
+                } else {
+                  viewCount = Math.round(num)
+                }
+              }
+            }
+
+            result.push({ videoId, viewText, viewCount })
+          })
+          return result
+        })
+
+        // 合并到已采集的视频中
+        let newCount = 0
+        for (const v of videos) {
+          if (!collectedVideos.has(v.videoId)) {
+            collectedVideos.set(v.videoId, {
+              videoId: v.videoId,
+              videoUrl: `https://www.youtube.com/shorts/${v.videoId}`,
+              viewCount: v.viewCount || 0,
+              collectedAt: new Date().toISOString()
+            })
+            newCount++
+          }
+        }
+
+        const totalCount = collectedVideos.size
+        console.log(`[YouTube] Hashtag scroll: found ${videos.length} on page, ${newCount} new, total ${totalCount}`)
+
+        onProgress?.({
+          type: 'progress',
+          total: totalCount,
+          newInThisScroll: newCount,
+          message: `已发现 ${totalCount} 个视频，滚动加载中...`
+        })
+
+        // 检查是否还有新视频
+        if (totalCount === lastCount) {
+          noNewCount++
+          console.log(`[YouTube] No new videos found (${noNewCount}/5)`)
+          if (noNewCount >= 5) {
+            console.log('[YouTube] No more new videos after 5 scrolls, stopping')
+            break
+          }
+        } else {
+          noNewCount = 0
+          lastCount = totalCount
+        }
+
+        // 滚动到页面底部
+        await this.page.evaluate(() => {
+          window.scrollTo(0, document.documentElement.scrollHeight)
+        })
+        await this.page.waitForTimeout(2000)
+      }
+
+      // 批量保存
+      console.log(`[YouTube] Hashtag collection done, saving ${collectedVideos.size} videos...`)
+      onProgress?.({ type: 'status', message: `滚动完成，正在保存 ${collectedVideos.size} 个视频...` })
+
+      let savedCount = 0
+      let duplicateCount = 0
+      for (const video of collectedVideos.values()) {
+        const saved = onSave?.(video)
+        if (saved) {
+          savedCount++
+        } else {
+          duplicateCount++
+        }
+      }
+
+      const elapsedSeconds = Math.round((Date.now() - startTime) / 1000)
+      console.log(`[YouTube] Hashtag collection complete: ${savedCount} saved, ${duplicateCount} duplicates, ${elapsedSeconds}s elapsed`)
+
+      return {
+        success: true,
+        total: collectedVideos.size,
+        saved: savedCount,
+        duplicates: duplicateCount,
+        elapsedSeconds
+      }
+    } catch (error) {
+      console.error('[YouTube] Hashtag collection error:', error)
+      return { success: false, error: error.message }
+    } finally {
+      this.isCollecting = false
+    }
+  }
+
+  /**
    * 开始自动采集 Shorts 视频
    * 采集条件：频道不在数据库中 + 未关注的频道 + 非广告
    * 智能浏览逻辑：
@@ -892,6 +1095,7 @@ class YouTubeService {
       groupName = null,
       allBenchmarkChannels = [],
       groupChannels = [],
+      excludedChannelHandles = new Set(),
       onProgress,
       onSave
     } = options
@@ -910,7 +1114,7 @@ class YouTubeService {
       groupChannels.map(ch => (ch.custom_url || '').replace('@', '').toLowerCase())
     )
 
-    console.log(`[YouTube] Smart browse mode: groupName="${groupName}", allChannels=${allChannelHandles.size}, groupChannels=${groupChannelHandles.size}`)
+    console.log(`[YouTube] Smart browse mode: groupName="${groupName}", allChannels=${allChannelHandles.size}, groupChannels=${groupChannelHandles.size}, excludedChannels=${excludedChannelHandles.size}`)
 
     this.isCollecting = true
     let collectedCount = 0
@@ -921,6 +1125,7 @@ class YouTubeService {
     let oldVideoCount = 0
     let watchedCount = 0 // 观看了分组内频道的视频
     let skippedNotInGroupCount = 0 // 跳过了不在分组内的频道
+    let excludedCount = 0 // 跳过了排除频道的视频
 
     // 本次采集会话中已处理的视频ID集合（避免同一视频被重复处理）
     const processedVideoIds = new Set()
@@ -965,13 +1170,11 @@ class YouTubeService {
           sameVideoCount++
           console.log(`[YouTube] Same video detected (${sameVideoCount} times): ${video.videoId}`)
           if (sameVideoCount >= 3) {
-            console.log('[YouTube] Stuck on same video, trying harder scroll...')
-            // 多次按键尝试跳过
-            await this.page.keyboard.press('ArrowDown')
-            await this.page.waitForTimeout(500)
-            await this.page.keyboard.press('ArrowDown')
-            await this.page.waitForTimeout(2000)
+            console.log('[YouTube] Stuck on same video, reloading Shorts page...')
+            await this.reloadShortsPage()
             sameVideoCount = 0
+            sameContentCount = 0
+            await this.page.waitForTimeout(3000)
           } else {
             await this.scrollToNextShorts()
           }
@@ -984,9 +1187,11 @@ class YouTubeService {
           sameContentCount++
           console.log(`[YouTube] Same content detected (${sameContentCount} times), page not fully updated`)
           if (sameContentCount >= 3) {
-            console.log('[YouTube] Page stuck, waiting longer...')
-            await this.page.waitForTimeout(3000)
+            console.log('[YouTube] Content stuck, reloading Shorts page...')
+            await this.reloadShortsPage()
             sameContentCount = 0
+            sameVideoCount = 0
+            await this.page.waitForTimeout(3000)
           } else {
             await this.page.waitForTimeout(1000)
           }
@@ -1033,7 +1238,7 @@ class YouTubeService {
             type: 'skipped',
             reason: 'ad',
             video,
-            stats: { collectedCount, skippedCount, adCount, followedCount, duplicateCount, oldVideoCount, watchedCount, skippedNotInGroupCount }
+            stats: { collectedCount, skippedCount, adCount, followedCount, duplicateCount, oldVideoCount, watchedCount, skippedNotInGroupCount, excludedCount }
           })
           await this.scrollToNextShorts()
           continue
@@ -1041,10 +1246,25 @@ class YouTubeService {
 
         // 智能浏览逻辑：根据频道是否在数据库中决定行为
         const channelHandle = (video.channelHandle || '').toLowerCase()
+        const isExcluded = excludedChannelHandles.has(channelHandle)
         const isInDatabase = allChannelHandles.has(channelHandle)
         const isInSelectedGroup = groupChannelHandles.has(channelHandle)
 
-        console.log(`[YouTube] Channel "${channelHandle}": inDB=${isInDatabase}, inGroup=${isInSelectedGroup}`)
+        console.log(`[YouTube] Channel "${channelHandle}": excluded=${isExcluded}, inDB=${isInDatabase}, inGroup=${isInSelectedGroup}`)
+
+        // 排除频道 → 立即划走
+        if (isExcluded) {
+          console.log(`[YouTube] Skipping excluded channel "${channelHandle}" → immediately scroll`)
+          excludedCount++
+          onProgress?.({
+            type: 'skipped',
+            reason: 'excluded',
+            video,
+            stats: { collectedCount, skippedCount, adCount, followedCount, duplicateCount, oldVideoCount, watchedCount, skippedNotInGroupCount, excludedCount }
+          })
+          await this.scrollToNextShorts()
+          continue
+        }
 
         if (isInDatabase) {
           if (isInSelectedGroup && groupName) {
@@ -1057,7 +1277,7 @@ class YouTubeService {
               reason: 'in_group',
               video,
               watchTime,
-              stats: { collectedCount, skippedCount, adCount, followedCount, duplicateCount, oldVideoCount, watchedCount, skippedNotInGroupCount }
+              stats: { collectedCount, skippedCount, adCount, followedCount, duplicateCount, oldVideoCount, watchedCount, skippedNotInGroupCount, excludedCount }
             })
             // 等待视频时长
             await this.page.waitForTimeout(watchTime * 1000)
@@ -1071,7 +1291,7 @@ class YouTubeService {
               type: 'skipped',
               reason: 'not_in_group',
               video,
-              stats: { collectedCount, skippedCount, adCount, followedCount, duplicateCount, oldVideoCount, watchedCount, skippedNotInGroupCount }
+              stats: { collectedCount, skippedCount, adCount, followedCount, duplicateCount, oldVideoCount, watchedCount, skippedNotInGroupCount, excludedCount }
             })
             await this.scrollToNextShorts()
             continue
@@ -1091,7 +1311,7 @@ class YouTubeService {
             reason: 'new_channel_followed',
             video,
             waitTime,
-            stats: { collectedCount, skippedCount, adCount, followedCount, duplicateCount, oldVideoCount, watchedCount, skippedNotInGroupCount }
+            stats: { collectedCount, skippedCount, adCount, followedCount, duplicateCount, oldVideoCount, watchedCount, skippedNotInGroupCount, excludedCount }
           })
           console.log(`[YouTube] Waiting ${Math.round(waitTime / 1000)}s before scrolling (new channel, followed)`)
           await this.page.waitForTimeout(waitTime)
@@ -1110,7 +1330,7 @@ class YouTubeService {
             reason: 'new_channel_old_video',
             video,
             waitTime,
-            stats: { collectedCount, skippedCount, adCount, followedCount, duplicateCount, oldVideoCount, watchedCount, skippedNotInGroupCount }
+            stats: { collectedCount, skippedCount, adCount, followedCount, duplicateCount, oldVideoCount, watchedCount, skippedNotInGroupCount, excludedCount }
           })
           console.log(`[YouTube] Waiting ${Math.round(waitTime / 1000)}s before scrolling (new channel, old video)`)
           await this.page.waitForTimeout(waitTime)
@@ -1132,7 +1352,7 @@ class YouTubeService {
             type: 'skipped',
             reason: 'duplicate',
             video,
-            stats: { collectedCount, skippedCount, adCount, followedCount, duplicateCount, oldVideoCount, watchedCount, skippedNotInGroupCount }
+            stats: { collectedCount, skippedCount, adCount, followedCount, duplicateCount, oldVideoCount, watchedCount, skippedNotInGroupCount, excludedCount }
           })
         } else {
           // 保存成功
@@ -1142,7 +1362,7 @@ class YouTubeService {
           onProgress?.({
             type: 'collected',
             video,
-            stats: { collectedCount, skippedCount, adCount, followedCount, duplicateCount, oldVideoCount, watchedCount, skippedNotInGroupCount }
+            stats: { collectedCount, skippedCount, adCount, followedCount, duplicateCount, oldVideoCount, watchedCount, skippedNotInGroupCount, excludedCount }
           })
         }
 
@@ -1153,7 +1373,7 @@ class YouTubeService {
           reason: 'new_channel',
           video,
           waitTime,
-          stats: { collectedCount, skippedCount, adCount, followedCount, duplicateCount, oldVideoCount, watchedCount, skippedNotInGroupCount }
+          stats: { collectedCount, skippedCount, adCount, followedCount, duplicateCount, oldVideoCount, watchedCount, skippedNotInGroupCount, excludedCount }
         })
         console.log(`[YouTube] Waiting ${Math.round(waitTime / 1000)}s before scrolling (new channel)`)
         await this.page.waitForTimeout(waitTime)

@@ -356,6 +356,27 @@ class DatabaseService {
       )
     `)
 
+    // 创建排除频道表（从Supabase同步）
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS excluded_channels (
+        id TEXT PRIMARY KEY,
+        channel_id TEXT NOT NULL UNIQUE,
+        channel_title TEXT,
+        channel_thumbnail_url TEXT,
+        channel_custom_url TEXT,
+        subscriber_count INTEGER DEFAULT 0,
+        video_count INTEGER DEFAULT 0,
+        view_count INTEGER DEFAULT 0,
+        country TEXT,
+        published_at TEXT,
+        exclude_reason TEXT,
+        remark TEXT,
+        created_at DATETIME,
+        updated_at DATETIME,
+        synced_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `)
+
     console.log('Database tables created/verified')
   }
 
@@ -1769,11 +1790,74 @@ class DatabaseService {
   }
 
   /**
+   * 保存排除频道（批量upsert）
+   */
+  saveExcludedChannels(channels) {
+    const stmt = this.db.prepare(`
+      INSERT OR REPLACE INTO excluded_channels
+      (id, channel_id, channel_title, channel_thumbnail_url, channel_custom_url,
+       subscriber_count, video_count, view_count, country, published_at,
+       exclude_reason, remark, created_at, updated_at, synced_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    `)
+
+    const insertMany = this.db.transaction((channels) => {
+      for (const ch of channels) {
+        stmt.run(
+          ch.id,
+          ch.channel_id,
+          ch.channel_title,
+          ch.channel_thumbnail_url,
+          ch.channel_custom_url,
+          ch.subscriber_count || 0,
+          ch.video_count || 0,
+          ch.view_count || 0,
+          ch.country,
+          ch.published_at,
+          ch.exclude_reason,
+          ch.remark,
+          ch.created_at,
+          ch.updated_at
+        )
+      }
+    })
+
+    insertMany(channels)
+    return channels.length
+  }
+
+  /**
+   * 获取本地排除频道
+   */
+  getExcludedChannels() {
+    return this.db.prepare(`
+      SELECT * FROM excluded_channels ORDER BY created_at DESC
+    `).all()
+  }
+
+  /**
+   * 获取排除频道的 channel_id 集合（用于快速查找）
+   */
+  getExcludedChannelIds() {
+    const rows = this.db.prepare(`SELECT channel_id FROM excluded_channels`).all()
+    return new Set(rows.map(r => r.channel_id))
+  }
+
+  /**
+   * 获取排除频道的 custom_url 集合（用于快速查找，去掉@符号）
+   */
+  getExcludedChannelHandles() {
+    const rows = this.db.prepare(`SELECT channel_custom_url FROM excluded_channels WHERE channel_custom_url IS NOT NULL`).all()
+    return new Set(rows.map(r => (r.channel_custom_url || '').replace('@', '').toLowerCase()))
+  }
+
+  /**
    * 获取对标频道同步状态
    */
   getBenchmarkSyncStatus() {
     const groupCount = this.db.prepare(`SELECT COUNT(*) as count FROM benchmark_channel_groups`).get()
     const channelCount = this.db.prepare(`SELECT COUNT(*) as count FROM benchmark_channels`).get()
+    const excludedCount = this.db.prepare(`SELECT COUNT(*) as count FROM excluded_channels`).get()
     const lastSync = this.db.prepare(`
       SELECT MAX(synced_at) as last_synced FROM benchmark_channels
     `).get()
@@ -1781,6 +1865,7 @@ class DatabaseService {
     return {
       groupCount: groupCount?.count || 0,
       channelCount: channelCount?.count || 0,
+      excludedCount: excludedCount?.count || 0,
       lastSynced: lastSync?.last_synced
     }
   }

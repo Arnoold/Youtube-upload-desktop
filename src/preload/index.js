@@ -416,6 +416,11 @@ contextBridge.exposeInMainWorld('electron', {
     // 监听同步进度
     onSyncToSupabaseProgress: (callback) => {
       ipcRenderer.on('youtube-collect:sync-to-supabase-progress', (event, data) => callback(data))
+    },
+    // Hashtag 采集
+    collectFromHashtag: (options) => ipcRenderer.invoke('youtube-collect:collect-from-hashtag', options),
+    onHashtagProgress: (callback) => {
+      ipcRenderer.on('youtube-collect:hashtag-progress', (event, data) => callback(data))
     }
   }
 })

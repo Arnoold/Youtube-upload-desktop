@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { Typography, Card, Button, Space, Table, Tag, message, Select, Spin, Statistic, Row, Col } from 'antd'
+import { Typography, Card, Button, Space, Table, Tag, message, Select, Spin, Statistic, Row, Col, Input } from 'antd'
 import {
   PlayCircleOutlined,
   PauseCircleOutlined,
@@ -11,7 +11,8 @@ import {
   ClockCircleOutlined,
   SyncOutlined,
   CloudDownloadOutlined,
-  CloudUploadOutlined
+  CloudUploadOutlined,
+  TagOutlined
 } from '@ant-design/icons'
 
 const { Title, Text } = Typography
@@ -46,7 +47,8 @@ const YouTubeCollectPage = () => {
     duplicateCount: 0,
     oldVideoCount: 0,
     watchedCount: 0, // 观看了分组内频道的视频
-    skippedNotInGroupCount: 0 // 跳过了数据库中但不在分组内的频道
+    skippedNotInGroupCount: 0, // 跳过了数据库中但不在分组内的频道
+    excludedCount: 0 // 跳过了排除频道的视频
   })
 
   // 计时相关
@@ -56,7 +58,7 @@ const YouTubeCollectPage = () => {
 
   // 同步相关
   const [isSyncing, setIsSyncing] = useState(false)
-  const [syncStatus, setSyncStatus] = useState({ groupCount: 0, channelCount: 0, lastSynced: null })
+  const [syncStatus, setSyncStatus] = useState({ groupCount: 0, channelCount: 0, excludedCount: 0, lastSynced: null })
 
   // 上传到Supabase相关
   const [isSyncingToSupabase, setIsSyncingToSupabase] = useState(false)
@@ -64,6 +66,11 @@ const YouTubeCollectPage = () => {
   // 频道分组相关
   const [channelGroups, setChannelGroups] = useState([])
   const [selectedGroup, setSelectedGroup] = useState(null) // null 表示不使用分组过滤
+
+  // Hashtag 采集相关
+  const [hashtagUrl, setHashtagUrl] = useState('')
+  const [isHashtagCollecting, setIsHashtagCollecting] = useState(false)
+  const [hashtagProgress, setHashtagProgress] = useState('')
 
   // 加载采集账号列表（从账号管理中添加的账号）
   const loadBrowsers = async () => {
@@ -117,6 +124,7 @@ const YouTubeCollectPage = () => {
         setSyncStatus({
           groupCount: result.groupCount || 0,
           channelCount: result.channelCount || 0,
+          excludedCount: result.excludedCount || 0,
           lastSynced: result.lastSynced
         })
       }
@@ -220,7 +228,8 @@ const YouTubeCollectPage = () => {
           followed: '⏭️ 已关注频道 → 划走',
           duplicate: '⏭️ 已采集过 → 划走',
           old: '⏭️ 旧视频(>4月) → 划走',
-          not_in_group: `⏭️ 已在数据库(非分组) @${data.video?.channelHandle} → 立即划走`
+          not_in_group: `⏭️ 已在数据库(非分组) @${data.video?.channelHandle} → 立即划走`,
+          excluded: `🚫 排除频道 @${data.video?.channelHandle} → 立即划走`
         }
         setCurrentOperation(reasons[data.reason] || '处理中...')
       } else if (data.type === 'watching') {
@@ -233,6 +242,11 @@ const YouTubeCollectPage = () => {
       }
     })
 
+    // 监听 Hashtag 采集进度
+    window.electron.youtubeCollect.onHashtagProgress((data) => {
+      setHashtagProgress(data.message || '')
+    })
+
     // 定时轮询状态，保持同步（每3秒）
     const statusInterval = setInterval(() => {
       getStatus()
@@ -240,6 +254,7 @@ const YouTubeCollectPage = () => {
 
     return () => {
       window.electron.youtubeCollect.removeListener('youtube-collect:auto-progress')
+      window.electron.youtubeCollect.removeListener('youtube-collect:hashtag-progress')
       clearInterval(statusInterval)
     }
   }, [])
@@ -321,7 +336,7 @@ const YouTubeCollectPage = () => {
     }
 
     setIsCollecting(true)
-    setStats({ collectedCount: 0, skippedCount: 0, adCount: 0, followedCount: 0, duplicateCount: 0, oldVideoCount: 0, watchedCount: 0, skippedNotInGroupCount: 0 })
+    setStats({ collectedCount: 0, skippedCount: 0, adCount: 0, followedCount: 0, duplicateCount: 0, oldVideoCount: 0, watchedCount: 0, skippedNotInGroupCount: 0, excludedCount: 0 })
     setCurrentOperation('正在自动采集...')
     startTimer()
 
@@ -358,6 +373,36 @@ const YouTubeCollectPage = () => {
       loadSavedVideos()
     } catch (error) {
       message.error('停止失败: ' + error.message)
+    }
+  }
+
+  // Hashtag 采集
+  const handleHashtagCollect = async () => {
+    if (!isConnected) {
+      message.warning('请先连接浏览器')
+      return
+    }
+    if (!hashtagUrl || !hashtagUrl.includes('/hashtag/')) {
+      message.warning('请输入有效的 Hashtag URL（如 https://www.youtube.com/hashtag/xxx/shorts）')
+      return
+    }
+
+    setIsHashtagCollecting(true)
+    setHashtagProgress('准备开始...')
+
+    try {
+      const result = await window.electron.youtubeCollect.collectFromHashtag({ hashtagUrl })
+      if (result.success) {
+        message.success(`Hashtag 采集完成！共 ${result.total} 个视频，新增 ${result.saved} 个，重复 ${result.duplicates} 个`)
+        loadSavedVideos()
+      } else {
+        message.error(result.error || '采集失败')
+      }
+    } catch (error) {
+      message.error('采集失败: ' + error.message)
+    } finally {
+      setIsHashtagCollecting(false)
+      setHashtagProgress('')
     }
   }
 
@@ -545,9 +590,9 @@ const YouTubeCollectPage = () => {
             icon={<CloudDownloadOutlined />}
             onClick={handleSyncFromSupabase}
             loading={isSyncing}
-            title={syncStatus.lastSynced ? `上次同步: ${new Date(syncStatus.lastSynced).toLocaleString()}\n分组: ${syncStatus.groupCount}, 频道: ${syncStatus.channelCount}` : '从Supabase同步对标频道数据'}
+            title={syncStatus.lastSynced ? `上次同步: ${new Date(syncStatus.lastSynced).toLocaleString()}\n分组: ${syncStatus.groupCount}, 对标频道: ${syncStatus.channelCount}, 排除频道: ${syncStatus.excludedCount}` : '从Supabase同步对标频道和排除频道数据'}
           >
-            同步Supabase {syncStatus.channelCount > 0 && `(${syncStatus.channelCount})`}
+            同步Supabase {(syncStatus.channelCount > 0 || syncStatus.excludedCount > 0) && `(${syncStatus.channelCount}+${syncStatus.excludedCount})`}
           </Button>
           <Button
             icon={<CloudUploadOutlined />}
@@ -558,6 +603,36 @@ const YouTubeCollectPage = () => {
           >
             上传到Supabase {collectedVideos.length > 0 && `(${collectedVideos.length})`}
           </Button>
+        </Space>
+      </Card>
+
+      {/* Hashtag 采集 */}
+      <Card size="small" style={{ marginBottom: 16 }}>
+        <Space size="middle" align="center">
+          <TagOutlined />
+          <Text>Hashtag采集:</Text>
+          <Input
+            style={{ width: 400 }}
+            placeholder="输入 Hashtag URL（如 https://www.youtube.com/hashtag/liriklagu/shorts）"
+            value={hashtagUrl}
+            onChange={e => setHashtagUrl(e.target.value)}
+            disabled={isHashtagCollecting}
+          />
+          <Button
+            type="primary"
+            icon={<RocketOutlined />}
+            onClick={handleHashtagCollect}
+            loading={isHashtagCollecting}
+            disabled={!isConnected || isCollecting}
+          >
+            {isHashtagCollecting ? '采集中' : '开始采集'}
+          </Button>
+          {hashtagProgress && (
+            <Text type="secondary">
+              <Spin size="small" style={{ marginRight: 4 }} />
+              {hashtagProgress}
+            </Text>
+          )}
         </Space>
       </Card>
 
@@ -585,6 +660,9 @@ const YouTubeCollectPage = () => {
             </Col>
             <Col span={2}>
               <Statistic title="旧视频" value={stats.oldVideoCount} valueStyle={{ color: '#eb2f96' }} />
+            </Col>
+            <Col span={2}>
+              <Statistic title="排除频道" value={stats.excludedCount} valueStyle={{ color: '#f5222d' }} />
             </Col>
             <Col span={3}>
               <Statistic

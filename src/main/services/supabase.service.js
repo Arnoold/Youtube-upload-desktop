@@ -906,6 +906,34 @@ class SupabaseService {
   }
 
   /**
+   * 获取排除频道列表
+   */
+  async getExcludedChannels() {
+    if (!this.client) {
+      console.log('[Supabase] Client not initialized')
+      return { success: false, error: 'Supabase 未初始化', data: [] }
+    }
+
+    try {
+      const { data, error } = await this.client
+        .from('excluded_channels')
+        .select('id, channel_id, channel_title, channel_thumbnail_url, channel_custom_url, subscriber_count, video_count, view_count, country, published_at, exclude_reason, remark, created_at, updated_at')
+        .order('created_at', { ascending: false })
+
+      if (error) {
+        console.error('[Supabase] Failed to get excluded channels:', error.message)
+        return { success: false, error: error.message, data: [] }
+      }
+
+      console.log('[Supabase] Got', data.length, 'excluded channels')
+      return { success: true, data }
+    } catch (err) {
+      console.error('[Supabase] Error getting excluded channels:', err.message)
+      return { success: false, error: err.message, data: [] }
+    }
+  }
+
+  /**
    * 获取Supabase中已存在的YouTube采集视频ID列表
    * @param {Array<string>} videoIds - 要检查的视频ID数组
    * @returns {Promise<Set<string>>} 已存在的视频ID集合

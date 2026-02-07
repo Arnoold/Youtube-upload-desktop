@@ -2289,8 +2289,10 @@ function setupIPC(mainWindow, services) {
       const allBenchmarkChannels = dbService.getBenchmarkChannels()
       // 如果指定了分组，获取该分组的频道
       const groupChannels = groupName ? dbService.getBenchmarkChannels(groupName) : []
+      // 获取排除频道 handle 集合
+      const excludedChannelHandles = dbService.getExcludedChannelHandles()
 
-      console.log(`[IPC] Loaded ${allBenchmarkChannels.length} benchmark channels, ${groupChannels.length} in group "${groupName || 'none'}"`)
+      console.log(`[IPC] Loaded ${allBenchmarkChannels.length} benchmark channels, ${groupChannels.length} in group "${groupName || 'none'}", ${excludedChannelHandles.size} excluded channels`)
 
       // TODO: 后续启用Supabase同步功能
       // // 批量保存到Supabase的函数
@@ -2316,6 +2318,7 @@ function setupIPC(mainWindow, services) {
         groupName,
         allBenchmarkChannels,
         groupChannels,
+        excludedChannelHandles,
         onProgress: (progress) => {
           // 发送进度到前端
           mainWindow.webContents.send('youtube-collect:auto-progress', progress)
@@ -2357,6 +2360,46 @@ function setupIPC(mainWindow, services) {
       return youtubeService.stopAutoCollect()
     } catch (error) {
       console.error('youtube-collect:stop-auto-collect error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // 从 Hashtag 页面采集视频
+  ipcMain.handle('youtube-collect:collect-from-hashtag', async (event, options = {}) => {
+    try {
+      const { hashtagUrl } = options
+      console.log('[IPC] Starting hashtag collection:', hashtagUrl)
+
+      const result = await youtubeService.collectFromHashtag({
+        hashtagUrl,
+        onProgress: (progress) => {
+          mainWindow.webContents.send('youtube-collect:hashtag-progress', progress)
+        },
+        onSave: (video) => {
+          const insertId = dbService.saveYoutubeVideo({
+            videoId: video.videoId,
+            videoUrl: video.videoUrl,
+            title: '',
+            channelHandle: '',
+            channelName: '',
+            viewCount: video.viewCount,
+            publishDate: '',
+            publishTimeType: '',
+            videoDuration: '',
+            videoDurationSeconds: 0,
+            isAd: false,
+            isFollowed: false,
+            accountId: '',
+            accountName: '',
+            collectedAt: video.collectedAt
+          })
+          return !!insertId
+        }
+      })
+
+      return result
+    } catch (error) {
+      console.error('youtube-collect:collect-from-hashtag error:', error)
       return { success: false, error: error.message }
     }
   })
@@ -2425,17 +2468,29 @@ function setupIPC(mainWindow, services) {
         return { success: false, error: '获取频道数据失败: ' + channelsResult.error }
       }
 
-      // 3. 保存到本地数据库
+      // 3. 获取排除频道数据
+      const excludedResult = await supabaseService.getExcludedChannels()
+      if (!excludedResult.success) {
+        console.warn('[IPC] Failed to get excluded channels:', excludedResult.error)
+        // 排除频道获取失败不影响整体同步
+      }
+
+      // 4. 保存到本地数据库
       const groupCount = dbService.saveBenchmarkChannelGroups(groupsResult.data)
       const channelCount = dbService.saveBenchmarkChannels(channelsResult.data)
+      let excludedCount = 0
+      if (excludedResult.success && excludedResult.data.length > 0) {
+        excludedCount = dbService.saveExcludedChannels(excludedResult.data)
+      }
 
-      console.log(`[IPC] Synced ${groupCount} groups, ${channelCount} channels from Supabase`)
+      console.log(`[IPC] Synced ${groupCount} groups, ${channelCount} channels, ${excludedCount} excluded from Supabase`)
 
       return {
         success: true,
         groupCount,
         channelCount,
-        message: `同步完成：${groupCount} 个分组，${channelCount} 个频道`
+        excludedCount,
+        message: `同步完成：${groupCount} 个分组，${channelCount} 个频道，${excludedCount} 个排除频道`
       }
     } catch (error) {
       console.error('youtube-collect:sync-benchmark-from-supabase error:', error)
