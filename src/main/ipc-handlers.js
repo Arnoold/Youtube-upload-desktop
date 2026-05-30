@@ -197,6 +197,195 @@ function setupIPC(mainWindow, services) {
     }
   })
 
+  // ===== 浏览器配置同步 (browser_profiles) =====
+
+  const BrowserProfileSyncService = require('./services/browser-profile-sync.service')
+  const browserProfileSyncService = new BrowserProfileSyncService()
+
+  ipcMain.handle('browser-profiles:list', async (event, options) => {
+    try {
+      return await browserProfileSyncService.getProfiles(supabaseService, options)
+    } catch (error) {
+      console.error('browser-profiles:list error:', error)
+      return { data: [], page: 1, pageSize: 50, hasMore: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('browser-profiles:sync-hubstudio', async () => {
+    try {
+      return await browserProfileSyncService.syncHubStudio(hubStudioService, supabaseService)
+    } catch (error) {
+      console.error('browser-profiles:sync-hubstudio error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('browser-profiles:sync-bitbrowser', async () => {
+    try {
+      return await browserProfileSyncService.syncBitBrowser(bitBrowserService, supabaseService)
+    } catch (error) {
+      console.error('browser-profiles:sync-bitbrowser error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('browser-profiles:update-account-status', async (event, id, accountStatus) => {
+    try {
+      return await browserProfileSyncService.updateAccountStatus(supabaseService, id, accountStatus)
+    } catch (error) {
+      console.error('browser-profiles:update-account-status error:', error)
+      throw error
+    }
+  })
+
+  // ===== Claude 用量采集 =====
+
+  const ClaudeUsageService = require('./services/claude-usage.service')
+  const claudeUsageService = new ClaudeUsageService()
+
+  // ===== 网页端指令轮询（device_commands）=====
+  // 直接内联实现，避免单独文件未被 electron-vite 打包导致 require 失败。
+  // 复用上面这些 service 实例（claudeUsageService / supabaseService / bitBrowserService / hubStudioService）。
+  ;(function startCommandPoller() {
+    const DEVICE_ID = 'desktop-01' // 单台固定标识
+    const POLL_INTERVAL = 3000
+    let busy = false
+
+    const updateCmd = async (id, fields) => {
+      try {
+        await supabaseService.client
+          .from('device_commands')
+          .update({ ...fields, updated_at: new Date().toISOString() })
+          .eq('id', id)
+      } catch (e) {
+        console.error('[CommandPoller] 回写状态失败:', e.message)
+      }
+    }
+
+    const tick = async () => {
+      if (busy || !supabaseService || !supabaseService.client) return
+      busy = true
+      try {
+        const { data: cmds, error } = await supabaseService.client
+          .from('device_commands')
+          .select('*')
+          .eq('device_id', DEVICE_ID)
+          .eq('status', 'pending')
+          .order('created_at', { ascending: true })
+          .limit(1)
+        if (error) {
+          console.error('[CommandPoller] 查询指令失败:', error.message)
+          return
+        }
+        const cmd = cmds && cmds[0]
+        if (!cmd) return
+
+        console.log(`[CommandPoller] 收到指令 ${cmd.id} type=${cmd.type}`)
+        await updateCmd(cmd.id, { status: 'running' })
+
+        let result
+        try {
+          if (cmd.type === 'claude_collect_one') {
+            const profileId = cmd.payload && cmd.payload.profileId
+            if (profileId === undefined || profileId === null || profileId === '') {
+              result = { success: false, error: '缺少 payload.profileId' }
+            } else {
+              result = await claudeUsageService.fetchOneById(profileId, {
+                supabaseService,
+                bitBrowserService,
+                hubStudioService
+              })
+            }
+          } else {
+            result = { success: false, error: '未知指令类型: ' + cmd.type }
+          }
+        } catch (e) {
+          await updateCmd(cmd.id, { status: 'failed', result: { error: e.message } })
+          return
+        }
+
+        if (result && result.success === false) {
+          await updateCmd(cmd.id, { status: 'failed', result: { error: result.error || '执行失败' } })
+        } else {
+          await updateCmd(cmd.id, { status: 'success', result: result || {} })
+        }
+        console.log(`[CommandPoller] 指令 ${cmd.id} 完成`)
+      } catch (e) {
+        console.error('[CommandPoller] 轮询异常:', e.message)
+      } finally {
+        busy = false
+      }
+    }
+
+    setInterval(tick, POLL_INTERVAL)
+    console.log(`[CommandPoller] 已启动(内联)，device_id=${DEVICE_ID}，每 ${POLL_INTERVAL}ms 轮询一次`)
+
+    // ===== 心跳上报：让网页端知道桌面端是否在线 =====
+    const HEARTBEAT_INTERVAL = 10000 // 每 10 秒上报一次（后端 30 秒超时判离线）
+    const sendHeartbeat = async () => {
+      if (!supabaseService || !supabaseService.client) return
+      try {
+        await supabaseService.client
+          .from('device_heartbeats')
+          .upsert(
+            { device_id: DEVICE_ID, last_seen: new Date().toISOString(), info: { app: 'youtube-upload-desktop' } },
+            { onConflict: 'device_id' }
+          )
+      } catch (e) {
+        console.error('[CommandPoller] 心跳上报失败:', e.message)
+      }
+    }
+    sendHeartbeat() // 启动后立即上报一次
+    setInterval(sendHeartbeat, HEARTBEAT_INTERVAL)
+    console.log(`[CommandPoller] 心跳上报已启动，每 ${HEARTBEAT_INTERVAL}ms 一次`)
+  })()
+
+  ipcMain.handle('claude-usage:start', async () => {
+    try {
+      const onLog = (type, message) => {
+        const time = new Date().toLocaleTimeString('zh-CN')
+        mainWindow.webContents.send('claude-usage:log', { type, message, time })
+      }
+      return await claudeUsageService.fetchAll({
+        supabaseService,
+        bitBrowserService,
+        hubStudioService
+      }, onLog)
+    } catch (error) {
+      console.error('claude-usage:start error:', error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('claude-usage:stop', async () => {
+    claudeUsageService.stop()
+    return { success: true }
+  })
+
+  ipcMain.handle('claude-usage:fetch-one', async (event, profileId) => {
+    // 复用 service 里的统一采集逻辑（与网页指令轮询同一段代码）
+    return await claudeUsageService.fetchOneById(profileId, {
+      supabaseService,
+      bitBrowserService,
+      hubStudioService
+    })
+  })
+
+  ipcMain.handle('claude-usage:get-schedule', async () => {
+    return claudeUsageService.getScheduleConfig()
+  })
+
+  ipcMain.handle('claude-usage:set-schedule', async (event, config) => {
+    return await claudeUsageService.updateScheduleConfig(config)
+  })
+
+  // 初始化定时任务
+  claudeUsageService.initSchedule(dbService, mainWindow, {
+    supabaseService,
+    bitBrowserService,
+    hubStudioService
+  })
+
   // ===== 上传任务相关 =====
 
   ipcMain.handle('upload:create', async (event, taskData) => {
@@ -398,13 +587,12 @@ function setupIPC(mainWindow, services) {
     try {
       const taskId = dbService.createOwnChannelTask(task)
       if (task.items && task.items.length > 0) {
-        // 复用 addCommentaryTaskItems 逻辑，但需要确认是否需要独立的方法
-        // DatabaseService 中我们添加了 addOwnChannelTaskItem，但没有批量添加的方法
-        // 我们需要循环调用或者在 DatabaseService 中添加批量方法
-        // 为了简单，这里循环调用
-        for (const item of task.items) {
-          dbService.addOwnChannelTaskItem(taskId, item.video_id, item.video_info)
-        }
+        // 使用批量插入（事务），性能更好
+        const items = task.items.map(item => ({
+          ...item.video_info,
+          video_id: item.video_id
+        }))
+        dbService.addOwnChannelTaskItems(taskId, items)
       }
       return taskId
     } catch (error) {
