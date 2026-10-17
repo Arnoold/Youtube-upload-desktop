@@ -11,7 +11,8 @@ import {
   UserOutlined,
   GlobalOutlined,
   HistoryOutlined,
-  YoutubeOutlined
+  YoutubeOutlined,
+  LaptopOutlined
 } from '@ant-design/icons'
 import HomePage from './pages/HomePage'
 import BrowserPage from './pages/BrowserPage'
@@ -27,6 +28,8 @@ import CollectAccountPage from './pages/CollectAccountPage'
 import BrowserSettingsPage from './pages/BrowserSettingsPage'
 import UploadLogsPage from './pages/UploadLogsPage'
 import OwnChannelCommentaryPage from './pages/OwnChannelCommentaryPage'
+import BrowserProfilesPage from './pages/BrowserProfilesPage'
+import ClaudeUsagePage from './pages/ClaudeUsagePage'
 
 const { Content, Sider } = Layout
 
@@ -120,6 +123,22 @@ const App = () => {
     },
     {
       type: 'group',
+      label: 'Claude账号',
+      children: [
+        {
+          key: 'browser-profiles',
+          icon: <LaptopOutlined />,
+          label: '浏览器列表'
+        },
+        {
+          key: 'claude-usage',
+          icon: <DatabaseOutlined />,
+          label: '获取当前用量'
+        }
+      ]
+    },
+    {
+      type: 'group',
       label: '系统设置',
       children: [
         {
@@ -165,6 +184,10 @@ const App = () => {
         return <OwnChannelSchedulerPage />
       case 'aistudio-accounts':
         return <AIStudioAccountsPage />
+      case 'browser-profiles':
+        return <BrowserProfilesPage />
+      case 'claude-usage':
+        return <ClaudeUsagePage />
       case 'browser':
         return <BrowserPage />
       case 'browser-settings':

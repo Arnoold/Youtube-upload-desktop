@@ -151,6 +151,29 @@ contextBridge.exposeInMainWorld('electron', {
     }
   },
 
+  // 浏览器配置同步（Supabase browser_profiles 表）
+  browserProfiles: {
+    list: (options) => ipcRenderer.invoke('browser-profiles:list', options),
+    syncHubStudio: () => ipcRenderer.invoke('browser-profiles:sync-hubstudio'),
+    syncBitBrowser: () => ipcRenderer.invoke('browser-profiles:sync-bitbrowser'),
+    updateAccountStatus: (id, status) => ipcRenderer.invoke('browser-profiles:update-account-status', id, status)
+  },
+
+  // Claude 用量采集
+  claudeUsage: {
+    start: () => ipcRenderer.invoke('claude-usage:start'),
+    stop: () => ipcRenderer.invoke('claude-usage:stop'),
+    fetchOne: (profileId) => ipcRenderer.invoke('claude-usage:fetch-one', profileId),
+    getSchedule: () => ipcRenderer.invoke('claude-usage:get-schedule'),
+    setSchedule: (config) => ipcRenderer.invoke('claude-usage:set-schedule', config),
+    onLog: (callback) => {
+      ipcRenderer.on('claude-usage:log', (event, data) => callback(data))
+    },
+    removeLogListener: () => {
+      ipcRenderer.removeAllListeners('claude-usage:log')
+    }
+  },
+
   // 采集账号管理
   collectAccount: {
     list: (platform) => ipcRenderer.invoke('collect-account:list', platform),

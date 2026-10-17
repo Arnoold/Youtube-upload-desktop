@@ -160,3 +160,6 @@ Thumbs.db
 
 # Resources (if contains large binaries)
 # resources/
+
+# Gemini API key (local only)
+gemini_api_key.txt

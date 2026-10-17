@@ -83,6 +83,31 @@ class BitBrowserService {
   }
 
   /**
+   * 获取所有浏览器配置（自动分页）
+   * @returns {Promise<Array>} 全部配置列表
+   */
+  async getAllProfiles() {
+    const allProfiles = []
+    let page = 0
+    const pageSize = 100
+
+    while (true) {
+      const response = await this.client.post(`${this.apiUrl}/browser/list`, {
+        page,
+        pageSize
+      })
+      const list = response.data?.data?.list || []
+      allProfiles.push(...list)
+      console.log(`[BitBrowser] Page ${page}: got ${list.length} profiles, total so far: ${allProfiles.length}`)
+      if (list.length < pageSize) break
+      page++
+    }
+
+    console.log(`[BitBrowser] getAllProfiles done: ${allProfiles.length} profiles`)
+    return allProfiles
+  }
+
+  /**
    * 创建浏览器配置
    * @param {Object} config - 配置信息
    * @returns {Promise<Object>} 创建结果

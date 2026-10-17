@@ -153,15 +153,15 @@ class SupabaseService {
           'description', // 对应 video_description
           'thumbnail', 'duration', 'published_at',
           'view_count', 'like_count', 'comment_count',
-          'tags',
+          'tags', 'url', 'generation_status',
           'created_at', 'updated_at'
         ].join(',')
       } else {
-        // 对标视频表字段 - 精简到最小必需，避免查询超时
+        // 对标视频表字段
         selectFields = [
           'id', 'video_id', 'channel_id', 'title',
-          'channel_name', 'published_at',
-          'view_count', 'generation_status'
+          'channel_name', 'published_at', 'url',
+          'view_count', 'generation_status', 'created_at'
         ].join(',')
       }
     }
@@ -203,40 +203,32 @@ class SupabaseService {
       }
     }
 
-    // const tableName = options.tableName || this.config.tableName // Moved up
-    // 完全禁用 count 查询，因为它会导致超时
-    // 前端将通过分页加载的方式判断是否还有更多数据
     let query = this.client
       .from(tableName)
       .select(selectFields)
 
-    // 生成状态筛选（支持多选）
-    if (options.statusList && options.statusList.length > 0) {
-      // 多选模式
-      const hasPendingAll = options.statusList.includes('pending_all')
+    // 生成状态筛选
+    const statusList = options.statusList && options.statusList.length > 0 ? options.statusList : null
+    const singleStatus = options.status || null
+    if (statusList) {
+      const hasPendingAll = statusList.includes('pending_all')
       if (hasPendingAll) {
-        // pending_all 表示同时查询 null 和 pending 两种状态
-        const otherStatuses = options.statusList.filter(s => s !== 'pending_all')
+        const otherStatuses = statusList.filter(s => s !== 'pending_all')
         if (otherStatuses.length > 0) {
-          // 有其他状态，使用 or 条件组合
           const orConditions = ['generation_status.is.null', 'generation_status.eq.pending']
           otherStatuses.forEach(s => orConditions.push(`generation_status.eq.${s}`))
           query = query.or(orConditions.join(','))
         } else {
-          // 只有 pending_all，查询 null 和 pending
           query = query.or('generation_status.is.null,generation_status.eq.pending')
         }
       } else {
-        const statusValues = options.statusList
-        query = query.in('generation_status', statusValues)
+        query = query.in('generation_status', statusList)
       }
-    } else if (options.status) {
-      // 兼容旧的单选模式
-      if (options.status === 'pending_all' || options.status === 'null') {
-        // pending_all 表示同时查询 null 和 pending 两种状态
+    } else if (singleStatus) {
+      if (singleStatus === 'pending_all' || singleStatus === 'null') {
         query = query.or('generation_status.is.null,generation_status.eq.pending')
-      } else if (options.status !== 'all') {
-        query = query.eq('generation_status', options.status)
+      } else if (singleStatus !== 'all') {
+        query = query.eq('generation_status', singleStatus)
       }
     }
 
@@ -246,7 +238,7 @@ class SupabaseService {
         .lte('published_at', options.dateRange[1])
     }
 
-    // 添加时间范围筛选（视频被采集到系统的时间）
+    // 添加时间范围筛选
     if (options.createdAtRange && options.createdAtRange.length === 2) {
       query = query.gte('created_at', options.createdAtRange[0])
         .lte('created_at', options.createdAtRange[1])
@@ -258,14 +250,21 @@ class SupabaseService {
       startDate.setDate(startDate.getDate() - options.days)
       query = query.gte('published_at', startDate.toISOString())
     } else if (!options.dateRange && !options.createdAtRange && !isOwnChannel) {
-      // 没有指定任何时间范围时，默认只查询最近90天的数据，避免全表扫描
       const defaultStartDate = new Date()
       defaultStartDate.setDate(defaultStartDate.getDate() - 90)
       query = query.gte('published_at', defaultStartDate.toISOString())
-      console.log('[Supabase] 未指定时间范围，默认查询最近90天数据')
     }
 
     // 最小播放量筛选
+    // 注意：or(is.null,eq.pending) + created_at + view_count 三者组合会导致 PostgreSQL 超时
+    // 解决方案：拆分 OR 为多个并行查询，每个查询用简单状态条件，保留全部筛选（包括 view_count）
+    const useCreatedAt = options.createdAtRange && options.createdAtRange.length === 2
+    const hasOrCondition = (statusList && statusList.includes('pending_all')) ||
+      (singleStatus && (singleStatus === 'pending_all' || singleStatus === 'null'))
+
+    if (options.minViews && useCreatedAt && hasOrCondition) {
+      return await this._getVideosSplitQuery(tableName, selectFields, options, filteredChannelIds, isOwnChannel)
+    }
     if (options.minViews) {
       query = query.gte('view_count', options.minViews)
     }
@@ -275,70 +274,221 @@ class SupabaseService {
       query = query.eq('group_name', options.groupName)
     }
 
-    // 频道筛选（包括状态筛选后的结果）
-    // 注意：如果频道ID数量太多（超过100个），IN查询可能会很慢
-    // 这种情况下，我们不使用IN筛选，而是在获取数据后再过滤
+    // 频道筛选
     const MAX_IN_CHANNEL_IDS = 100
     let postFilterChannelIds = null
 
     if (filteredChannelIds.length > 0) {
       if (filteredChannelIds.length <= MAX_IN_CHANNEL_IDS) {
-        // 频道数量较少，直接使用IN查询
         query = query.in('channel_id', filteredChannelIds)
       } else {
-        // 频道数量太多，跳过IN查询，后续在内存中过滤
-        // 但这种情况下需要获取更多数据来保证分页正确
         console.log(`[Supabase] 频道数量 ${filteredChannelIds.length} 超过 ${MAX_IN_CHANNEL_IDS}，将在内存中过滤`)
         postFilterChannelIds = new Set(filteredChannelIds)
       }
     } else if (options.channelId) {
-      // 兼容旧的单选参数
       query = query.eq('channel_id', options.channelId)
     }
 
-    // 排序 (默认按 id 降序，利用主键索引)
-    const sortBy = options.sortBy || 'id'
+    // 排序
+    let sortBy = options.sortBy || 'id'
+    if (options.createdAtRange && (sortBy === 'published_at' || sortBy === 'id')) {
+      sortBy = 'created_at'
+    }
     const sortOrder = options.sortOrder === 'asc' ? true : false
     query = query.order(sortBy, { ascending: sortOrder })
 
-    // 分页 (最奇50条，避免查询超时)
-    const limit = Math.min(options.limit || 20, 50)
+    // 分页
+    const limit = Math.min(options.limit || 20, 10000)
     const page = options.page || 1
     const offset = (page - 1) * limit
 
-    // 如果需要内存过滤，需要获取更多数据
-    if (postFilterChannelIds) {
-      // 获取足够多的数据来支持分页（最多获取5000条）
-      const fetchLimit = Math.min(5000, limit * 10)
+    const needPostFilter = postFilterChannelIds
+    if (needPostFilter) {
+      const fetchLimit = Math.min(10000, limit * 10)
       query = query.range(0, fetchLimit - 1)
     } else {
       query = query.range(offset, offset + limit - 1)
     }
 
+    const queryStart = Date.now()
     const { data, error } = await query
+    console.log(`[Supabase] getVideos done: ${Date.now() - queryStart}ms, rows=${data ? data.length : 'null'}, error=${error ? error.message : 'none'}`)
 
     if (error) {
       throw new Error(error.message)
     }
 
-    // 如果需要内存过滤
-    if (postFilterChannelIds && data) {
-      const filteredData = data.filter(item => postFilterChannelIds.has(item.channel_id))
-      const totalFiltered = filteredData.length
-      // 应用分页
-      const pagedData = filteredData.slice(offset, offset + limit)
+    let resultData = data || []
+
+    // 频道 ID 内存过滤
+    if (postFilterChannelIds && resultData.length > 0) {
+      resultData = resultData.filter(item => postFilterChannelIds.has(item.channel_id))
+    }
+
+    if (needPostFilter) {
+      const pagedData = resultData.slice(offset, offset + limit)
       return {
         data: pagedData,
-        total: totalFiltered,
+        total: resultData.length,
         page,
         pageSize: limit
       }
     }
 
     return {
-      data: data || [],
-      // 不再返回 total，前端通过判断 data.length < limit 来确定是否有更多数据
+      data: resultData,
       total: -1,
+      page,
+      pageSize: limit
+    }
+  }
+
+  /**
+   * 拆分 OR 查询为多个并行查询
+   * 解决 or(is.null,eq.pending) + created_at + view_count 三者组合导致 PostgreSQL 超时的问题
+   * 每个子查询用简单状态条件（无 OR），保留全部筛选条件（包括 view_count）
+   */
+  async _getVideosSplitQuery(tableName, selectFields, options, filteredChannelIds, isOwnChannel) {
+    console.log('[Supabase] 使用分拆查询避免 or + created_at + view_count 超时')
+
+    const statusList = options.statusList && options.statusList.length > 0 ? options.statusList : null
+
+    // 确定需要拆分的状态条件：pending_all = [null, 'pending']
+    let statusConditions = ['null', 'pending']
+    if (statusList) {
+      const otherStatuses = statusList.filter(s => s !== 'pending_all')
+      if (otherStatuses.length > 0) {
+        statusConditions = ['null', 'pending', ...otherStatuses]
+      }
+    }
+
+    // 分页参数
+    const limit = Math.min(options.limit || 20, 10000)
+    const page = options.page || 1
+    const offset = (page - 1) * limit
+    const fetchLimit = offset + limit // 每个子查询需要获取足够的行数
+
+    // 排序参数
+    let sortBy = options.sortBy || 'id'
+    if (options.createdAtRange && (sortBy === 'published_at' || sortBy === 'id')) {
+      sortBy = 'created_at'
+    }
+    const ascending = options.sortOrder === 'asc'
+
+    const BATCH_SIZE = 1000 // Supabase 每次请求最多 1000 行
+
+    const buildQuery = (statusValue, rangeStart, rangeEnd) => {
+      let q = this.client.from(tableName).select(selectFields)
+
+      // 状态条件（简单条件，无 OR）
+      if (statusValue === 'null') {
+        q = q.is('generation_status', null)
+      } else {
+        q = q.eq('generation_status', statusValue)
+      }
+
+      // 发布时间范围
+      if (options.dateRange && options.dateRange.length === 2) {
+        q = q.gte('published_at', options.dateRange[0]).lte('published_at', options.dateRange[1])
+      }
+
+      // 添加时间范围
+      if (options.createdAtRange && options.createdAtRange.length === 2) {
+        q = q.gte('created_at', options.createdAtRange[0]).lte('created_at', options.createdAtRange[1])
+      }
+
+      // 最近N天
+      if (options.days && !options.dateRange) {
+        const startDate = new Date()
+        startDate.setDate(startDate.getDate() - options.days)
+        q = q.gte('published_at', startDate.toISOString())
+      } else if (!options.dateRange && !options.createdAtRange && !isOwnChannel) {
+        const defaultStartDate = new Date()
+        defaultStartDate.setDate(defaultStartDate.getDate() - 90)
+        q = q.gte('published_at', defaultStartDate.toISOString())
+      }
+
+      // 最小播放量（保留在 DB 层！因为没有 OR 所以不会超时）
+      if (options.minViews) {
+        q = q.gte('view_count', options.minViews)
+      }
+
+      // 分组
+      if (options.groupName) {
+        q = q.eq('group_name', options.groupName)
+      }
+
+      // 频道筛选
+      if (filteredChannelIds.length > 0 && filteredChannelIds.length <= 100) {
+        q = q.in('channel_id', filteredChannelIds)
+      } else if (options.channelId) {
+        q = q.eq('channel_id', options.channelId)
+      }
+
+      // 排序
+      q = q.order(sortBy, { ascending })
+
+      q = q.range(rangeStart, rangeEnd)
+
+      return q
+    }
+
+    // 获取单个状态的全部数据（自动分页突破 1000 行限制）
+    const fetchAllForStatus = async (statusValue) => {
+      const rows = []
+      let fetchOffset = 0
+
+      while (fetchOffset < fetchLimit) {
+        const batchEnd = Math.min(fetchOffset + BATCH_SIZE, fetchLimit) - 1
+        const { data, error } = await buildQuery(statusValue, fetchOffset, batchEnd)
+        if (error) throw new Error(error.message)
+        if (data) rows.push(...data)
+        if (!data || data.length < BATCH_SIZE) break // 没有更多数据
+        fetchOffset += BATCH_SIZE
+      }
+
+      return rows
+    }
+
+    // 并行执行所有子查询（每个子查询内部自动分页）
+    const queryStart = Date.now()
+    const results = await Promise.all(statusConditions.map(s => fetchAllForStatus(s)))
+    const totalFetched = results.reduce((sum, r) => sum + r.length, 0)
+    console.log(`[Supabase] 分拆查询完成: ${Date.now() - queryStart}ms, ${statusConditions.length} 个子查询, 共 ${totalFetched} 行`)
+
+    // 合并结果，按 id 去重
+    let allData = []
+    const seenIds = new Set()
+    for (const rows of results) {
+      for (const item of rows) {
+        if (!seenIds.has(item.id)) {
+          seenIds.add(item.id)
+          allData.push(item)
+        }
+      }
+    }
+
+    // 排序合并后的结果
+    allData.sort((a, b) => {
+      const va = a[sortBy], vb = b[sortBy]
+      if (va < vb) return ascending ? -1 : 1
+      if (va > vb) return ascending ? 1 : -1
+      return 0
+    })
+
+    // 频道 ID 内存过滤（大量频道时）
+    if (filteredChannelIds.length > 100) {
+      const channelSet = new Set(filteredChannelIds)
+      allData = allData.filter(item => channelSet.has(item.channel_id))
+    }
+
+    // 分页
+    const pagedData = allData.slice(offset, offset + limit)
+    console.log(`[Supabase] 分拆查询结果: 合并 ${allData.length} 行, 返回第 ${page} 页 ${pagedData.length} 行`)
+
+    return {
+      data: pagedData,
+      total: allData.length,
       page,
       pageSize: limit
     }

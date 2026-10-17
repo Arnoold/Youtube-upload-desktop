@@ -21,7 +21,9 @@ function copyFilesPlugin() {
     { from: 'src/main/services/scheduler.service.js', to: 'dist-electron/main/services/scheduler.service.js' },
     { from: 'src/main/services/youtube-upload.service.js', to: 'dist-electron/main/services/youtube-upload.service.js' },
     { from: 'src/main/services/own-channel-scheduler.service.js', to: 'dist-electron/main/services/own-channel-scheduler.service.js' },
-    { from: 'src/main/services/youtube.service.js', to: 'dist-electron/main/services/youtube.service.js' }
+    { from: 'src/main/services/youtube.service.js', to: 'dist-electron/main/services/youtube.service.js' },
+    { from: 'src/main/services/browser-profile-sync.service.js', to: 'dist-electron/main/services/browser-profile-sync.service.js' },
+    { from: 'src/main/services/claude-usage.service.js', to: 'dist-electron/main/services/claude-usage.service.js' }
   ]
 
   function doCopy() {

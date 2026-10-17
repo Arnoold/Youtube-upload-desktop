@@ -192,7 +192,7 @@ const CreateTaskView = ({ onTaskCreated }) => {
         try {
             const values = await form.validateFields()
             const baseOptions = {
-                limit: 50, // 每页50条，减少单次查询量避免超时
+                limit: 1000, // 每页1000条（Supabase单次请求上限）
                 // 播放量输入的是"万"，需要乘以10000
                 minViews: values.minViews ? values.minViews * 10000 : undefined,
                 // Gemini生成状态筛选（支持多选）
@@ -227,9 +227,9 @@ const CreateTaskView = ({ onTaskCreated }) => {
                     break
                 }
                 page++
-                // 安全限制：最多获取5000条
-                if (allVideos.length >= 5000) {
-                    message.warning('数据量过大，仅显示前5000条')
+                // 安全限制：最多获取10000条
+                if (allVideos.length >= 10000) {
+                    message.warning('数据量过大，仅显示前10000条')
                     break
                 }
             }

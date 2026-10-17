@@ -21,6 +21,11 @@ class AIStudioService {
     this.taskQueue = [] // 待处理的任务项队列
     this.taskId = null // 当前任务ID
     this.rateLimitedBrowsers = new Set() // 本次任务中已达到速率限制的浏览器 ID
+    // 视频额度冷却：实测每个账号连做 1~2 个视频就会 permission denied，需冷却几分钟才恢复（纯文本不受限）
+    this.browserCooldownUntil = new Map() // browserProfileId -> 冷却到期时间戳(ms)
+    this.quotaRequeueCount = new Map()     // itemId -> 因视频额度被放回队列的次数（防止死循环）
+    this.videoQuotaCooldownMs = 180000     // 命中视频额度后该账号冷却时长(默认3分钟)
+    this.maxQuotaRequeue = 8               // 单条任务最多因额度放回队列次数，超过判失败
     this.defaultPrompt = `请分析以上我提供的 YouTube 视频链接的内容，并严格按照以下 JSON 格式输出分析结果。不要输出 JSON 以外的任何开场白或结束语。
 
 \`\`\`json
@@ -328,6 +333,197 @@ class AIStudioService {
   }
 
   /**
+   * 等待 YouTube 视频真正处理完成
+   *
+   * 旧逻辑用 waitForSelector 列表里包含了 `span.material-symbols-outlined:has-text("settings")`
+   * 这种页面上一直存在的图标，导致 waitForSelector 几乎瞬间返回、根本没等视频处理完，
+   * 之后只 sleep 1 秒就发送 → 视频未就绪 → "An internal error has occurred / permission denied"。
+   *
+   * 新逻辑：轮询顶部 token 数（视频处理完成后才会算出 token），等它出现且连续稳定后再返回，
+   * 模拟人工"看到 token 跳出来才发送"的行为。
+   * @param {Page} page - Playwright 页面对象
+   * @param {string} label - 日志前缀
+   * @returns {Promise<boolean>} 是否检测到处理完成（超时则返回 false，但仍可继续）
+   */
+  async waitForVideoProcessed(page, label = '') {
+    const maxWaitMs = 120000   // 最长等待 2 分钟
+    const start = Date.now()
+    let lastCount = -1
+    let stableReads = 0
+    let sawCount = false
+
+    while (Date.now() - start < maxWaitMs) {
+      if (this.shouldStop) break
+
+      // 1) 视频卡片内若仍有 loading / 进度条，说明还在处理
+      let spinning = false
+      try {
+        spinning = await page.evaluate(() => {
+          const chip = document.querySelector('ms-prompt-media, ms-prompt-video, ms-youtube-chunk')
+          if (!chip) return false
+          return !!chip.querySelector(
+            'mat-spinner, mat-progress-spinner, .mat-mdc-progress-spinner, [role="progressbar"], .loading, .processing'
+          )
+        })
+      } catch (e) { /* 忽略 */ }
+
+      // 2) 读取顶部 token 数（处理完成后才会算出）
+      //    优先用 ms-token-status；找不到时，扫描"只包含 token 计数文本"的叶子节点，
+      //    避免误抓页面里提到 "tokens" 的正文/描述。
+      let count = -1
+      try {
+        count = await page.evaluate(() => {
+          const parseTokens = (raw) => {
+            if (!raw) return -1
+            const m = raw.match(/([\d.,]+)\s*(?:\/\s*[\d.,]+)?\s*tokens?/i)
+            return m ? parseInt(m[1].replace(/[.,]/g, ''), 10) : -1
+          }
+          const statusEl = document.querySelector('ms-token-status, [data-test-id="token-count"]')
+          if (statusEl) {
+            const c = parseTokens(statusEl.innerText || statusEl.textContent || '')
+            if (c >= 0) return c
+          }
+          // 兜底：找文本严格形如 "1,234 tokens" / "1,234 / 1,048,576 tokens" 的计数控件
+          const pattern = /^[\d.,]+\s*(?:\/\s*[\d.,]+)?\s*tokens?$/i
+          const candidates = document.querySelectorAll('span, div, button')
+          for (const el of candidates) {
+            const t = (el.innerText || el.textContent || '').trim()
+            if (t.length <= 40 && pattern.test(t)) return parseTokens(t)
+          }
+          return -1
+        })
+      } catch (e) { /* 忽略 */ }
+
+      if (count > 0) sawCount = true
+
+      // token 数 > 0、无加载动画、且连续两次读数一致 → 视为处理完成
+      if (!spinning && count > 0 && count === lastCount) {
+        stableReads++
+        if (stableReads >= 2) {
+          console.log(`${label} 视频处理完成 (token=${count}, 耗时${Math.round((Date.now() - start) / 1000)}s)`)
+          return true
+        }
+      } else {
+        stableReads = 0
+      }
+      lastCount = count
+      await page.waitForTimeout(1500)
+    }
+
+    console.log(`${label} ⚠ 视频处理等待超时(${Math.round((Date.now() - start) / 1000)}s, sawToken=${sawCount})，继续尝试发送`)
+    return false
+  }
+
+  /**
+   * 判断一个错误是否值得重试（瞬时错误）
+   * AI Studio 的 Gemini 预览模型经常返回临时性错误（internal error / permission denied），
+   * 人工遇到时点一下 "Please try again" 通常就好了——这里把这类错误标记为可重试。
+   * 不重试：视频已删除、视频异常、速率限制（重试也没用，甚至有害）。
+   * @param {Error} error
+   * @returns {boolean}
+   */
+  isRetryableError(error) {
+    if (!error || !error.message) return false
+    if (error.isVideoDeleted || error.isVideoError) return false
+    const msg = error.message
+    if (msg.includes('速率限制') || msg.includes('rate limit')) return false
+    const retryablePatterns = [
+      'AI Studio 内部错误',
+      'AI Studio 生成失败',
+      'An internal error has occurred',
+      '无法获取 AI 回复内容',
+      'permission denied',
+      'Failed to generate',
+      '粘贴视频链接失败',
+      '视频处理超时',
+      '无法找到聊天输入框'
+    ]
+    return retryablePatterns.some(p => msg.includes(p))
+  }
+
+  /**
+   * 判断是否是"视频额度被限"导致的错误（permission denied / internal error / 生成失败 / 无法获取回复）。
+   * 实测：这类错误是单账号视频额度用尽，换账号/冷却后即恢复——不能在本账号原地重试，也不能直接判失败。
+   * 注意：视频已删除/视频异常/速率限制不算这一类。
+   * @param {Error} error
+   * @returns {boolean}
+   */
+  isVideoQuotaError(error) {
+    if (!error || !error.message) return false
+    if (error.isVideoDeleted || error.isVideoError) return false
+    const msg = error.message
+    if (msg.includes('速率限制') || msg.includes('rate limit')) return false
+    const quotaPatterns = [
+      'permission denied',
+      'Failed to generate',
+      'AI Studio 生成失败',
+      'AI Studio 内部错误',
+      'An internal error has occurred',
+      '无法获取 AI 回复内容'
+    ]
+    return quotaPatterns.some(p => msg.includes(p))
+  }
+
+  /**
+   * 用 CDP Input.insertText 注入文本（提示词）。
+   * 实测：剪贴板粘贴 + Ctrl+Enter 会被 AI Studio 判定为自动化 → "permission denied / internal error"；
+   * 而 CDP insertText（语义级插入，不走系统剪贴板、不模拟逐键事件）+ 真实鼠标点击发送 = 稳定通过。
+   * 额外好处：不占用系统剪贴板，多浏览器并行无需加锁。
+   * @param {Page} page
+   * @param {Locator} inputElement - 输入框
+   * @param {string} text
+   * @param {string} label - 日志前缀
+   */
+  async insertPromptViaCDP(page, inputElement, text, label = '') {
+    try { await inputElement.click(); await page.waitForTimeout(200) } catch (e) { /* ignore */ }
+    const client = await page.context().newCDPSession(page)
+    try {
+      await client.send('Input.insertText', { text })
+    } finally {
+      await client.detach().catch(() => {})
+    }
+    await page.waitForTimeout(300)
+  }
+
+  /**
+   * 用真实鼠标轨迹 + 点击发送按钮 ms-run-button（不用 Ctrl+Enter）。
+   * 注意：该按钮 aria-label 为空、class 也不是 run-button，旧选择器全部失效，
+   * 唯一可靠定位是 `ms-run-button button`。
+   * @returns {Promise<boolean>} 是否完成了点击动作
+   */
+  async clickRunButtonHuman(page, label = '') {
+    const btn = page.locator('ms-run-button button').first()
+    try {
+      await btn.waitFor({ state: 'visible', timeout: 8000 })
+    } catch (e) {
+      console.log(`${label} 未找到发送按钮 (ms-run-button button)`)
+      return false
+    }
+    // 等待按钮可用（aria-disabled 不为 true）
+    for (let i = 0; i < 20; i++) {
+      const dis = await btn.getAttribute('aria-disabled').catch(() => null)
+      if (dis !== 'true') break
+      await page.waitForTimeout(300)
+    }
+    await btn.scrollIntoViewIfNeeded().catch(() => {})
+    const box = await btn.boundingBox()
+    if (!box) {
+      await btn.click({ force: true }).catch(() => {})
+      return true
+    }
+    const cx = box.x + box.width / 2, cy = box.y + box.height / 2
+    // 模拟真人鼠标轨迹后点击
+    await page.mouse.move(cx - 100, cy - 50, { steps: 6 })
+    await page.waitForTimeout(80)
+    await page.mouse.move(cx, cy, { steps: 10 })
+    await page.waitForTimeout(80)
+    await page.mouse.down()
+    await page.waitForTimeout(50)
+    await page.mouse.up()
+    return true
+  }
+
+  /**
    * 开始执行持久化任务
    * @param {number} taskId - 任务 ID
    * @param {string} browserProfileId - BitBrowser 配置文件 ID
@@ -396,18 +592,41 @@ class AIStudioService {
             this.dbService.updateCommentaryTaskItemStatus(item.id, 'processing')
           }
 
-          // 执行处理
+          // 执行处理（带瞬时错误自动重试：模拟人工遇到 "Please try again" 时重试）
           console.log(`[AIStudio] Processing item ${item.id}, videoId: ${video.id}`)
           const tableName = taskType === 'own_channel' ? 'own_videos' : null
-          const result = await this.processVideo(video, browserProfileId, (progress) => {
-            progressCallback({
-              type: 'single',
-              taskId: taskId,
-              ...progress,
-              current: processedCount + 1,
-              total: total
-            })
-          }, { tableName })
+          const MAX_ATTEMPTS = 3
+          let result = null
+          for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            try {
+              result = await this.processVideo(video, browserProfileId, (progress) => {
+                progressCallback({
+                  type: 'single',
+                  taskId: taskId,
+                  ...progress,
+                  current: processedCount + 1,
+                  total: total
+                })
+              }, { tableName })
+              break // 成功
+            } catch (err) {
+              if (this.isRetryableError(err) && attempt < MAX_ATTEMPTS && !this.shouldStop) {
+                console.log(`[AIStudio] 第 ${attempt}/${MAX_ATTEMPTS} 次失败可重试: ${err.message}`)
+                progressCallback({
+                  type: 'single',
+                  taskId: taskId,
+                  videoId: video.id,
+                  status: 'processing',
+                  current: processedCount + 1,
+                  total: total,
+                  message: `AI 临时报错，重试 ${attempt}/${MAX_ATTEMPTS - 1}: ${video.title}`
+                })
+                await new Promise(resolve => setTimeout(resolve, 5000))
+                continue
+              }
+              throw err
+            }
+          }
 
           // 更新成功状态 - 只保存实际的AI回复内容，而不是整个结果对象
           const responseToSave = result.response || result
@@ -547,6 +766,8 @@ class AIStudioService {
     this.taskId = taskId
     this.currentTask = { type: 'parallel', id: taskId, taskType }
     this.rateLimitedBrowsers.clear() // 清空速率限制记录
+    this.browserCooldownUntil.clear()
+    this.quotaRequeueCount.clear()
 
     try {
       // 1. 获取任务项
@@ -650,6 +871,8 @@ class AIStudioService {
       this.taskQueue = []
       this.activeWorkers.clear()
       this.rateLimitedBrowsers.clear() // 清空速率限制记录，不影响下次使用
+      this.browserCooldownUntil.clear()
+      this.quotaRequeueCount.clear()
     }
   }
 
@@ -667,6 +890,23 @@ class AIStudioService {
 
     try {
       while (!this.shouldStop) {
+        // 冷却门：本账号若因视频额度处于冷却中，则等待（任务留在队列里给其它账号做）
+        const cdUntil = this.browserCooldownUntil.get(browserProfileId) || 0
+        if (Date.now() < cdUntil) {
+          if (this.taskQueue.length === 0) {
+            console.log(`[AIStudio] Worker ${workerId} 冷却中且队列已空，结束`)
+            break
+          }
+          const remainSec = Math.ceil((cdUntil - Date.now()) / 1000)
+          progressCallback({
+            type: 'worker', taskId, workerId, browserProfileId,
+            status: 'cooldown',
+            message: `[${workerId}] 视频额度冷却中，剩余约 ${remainSec}s（任务交其它账号）`
+          })
+          await new Promise(resolve => setTimeout(resolve, Math.min((cdUntil - Date.now()), 10000)))
+          continue
+        }
+
         // 从队列中获取下一个任务
         const item = this.taskQueue.shift()
         if (!item) {
@@ -697,19 +937,47 @@ class AIStudioService {
             this.dbService.updateCommentaryTaskItemStatus(item.id, 'processing')
           }
 
-          // 执行处理
+          // 执行处理（带瞬时错误自动重试：模拟人工遇到 "Please try again" 时重试）
           console.log(`[AIStudio] Worker ${workerId} processing item ${item.id}, videoId: ${video.id}`)
           const tableName = taskType === 'own_channel' ? 'own_videos' : null
-          const result = await this.processVideoForWorker(video, browserProfileId, workerId, (progress) => {
-            progressCallback({
-              type: 'single',
-              taskId: taskId,
-              workerId: workerId,
-              ...progress,
-              current: getCompleted() + 1,
-              total: total
-            })
-          }, {}, { tableName })
+          const MAX_ATTEMPTS = 3
+          let result = null
+          for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            try {
+              result = await this.processVideoForWorker(video, browserProfileId, workerId, (progress) => {
+                progressCallback({
+                  type: 'single',
+                  taskId: taskId,
+                  workerId: workerId,
+                  ...progress,
+                  current: getCompleted() + 1,
+                  total: total
+                })
+              }, {}, { tableName })
+              break // 成功，跳出重试循环
+            } catch (err) {
+              // 视频额度错误：不在本账号原地重试（重试也是 permission denied），直接交给外层冷却+换号
+              if (this.isVideoQuotaError(err)) {
+                throw err
+              }
+              if (this.isRetryableError(err) && attempt < MAX_ATTEMPTS && !this.shouldStop) {
+                console.log(`[AIStudio] Worker ${workerId} 第 ${attempt}/${MAX_ATTEMPTS} 次失败可重试: ${err.message}`)
+                progressCallback({
+                  type: 'single',
+                  taskId: taskId,
+                  workerId: workerId,
+                  videoId: video.id,
+                  status: 'processing',
+                  current: getCompleted() + 1,
+                  total: total,
+                  message: `[${workerId}] AI 临时报错，重试 ${attempt}/${MAX_ATTEMPTS - 1}: ${video.title}`
+                })
+                await new Promise(resolve => setTimeout(resolve, 5000))
+                continue
+              }
+              throw err // 不可重试或已到最大次数
+            }
+          }
 
           // 更新成功状态
           const responseToSave = result.response || result
@@ -789,6 +1057,43 @@ class AIStudioService {
 
             // 结束此 worker
             break
+          }
+
+          // 视频额度被限（permission denied / internal error）：冷却本账号 + 放回队列交其它账号
+          if (this.isVideoQuotaError(error)) {
+            const cnt = (this.quotaRequeueCount.get(item.id) || 0) + 1
+            this.quotaRequeueCount.set(item.id, cnt)
+            if (cnt > this.maxQuotaRequeue) {
+              // 多次换号/冷却仍失败，判定为真失败
+              console.log(`[AIStudio] Worker ${workerId} item ${item.id} 视频额度重试 ${cnt} 次仍失败，判失败`)
+              if (taskType === 'own_channel') {
+                this.dbService.updateOwnChannelTaskItemStatus(item.id, 'failed', null, error.message)
+              } else {
+                this.dbService.updateCommentaryTaskItemStatus(item.id, 'failed', null, error.message)
+              }
+              addCompleted(1)
+              progressCallback({
+                type: 'single', taskId, workerId, videoId: video.id, status: 'error',
+                current: getCompleted(), total, error: error.message,
+                message: `[${workerId}] 多次换号仍失败: ${video.title}`
+              })
+            } else {
+              // 放回队列尾部 + 冷却本账号，让其它未超额的账号去做
+              if (taskType === 'own_channel') {
+                this.dbService.updateOwnChannelTaskItemStatus(item.id, 'pending', null, null)
+              } else {
+                this.dbService.updateCommentaryTaskItemStatus(item.id, 'pending', null, null)
+              }
+              this.taskQueue.push(item)
+              this.browserCooldownUntil.set(browserProfileId, Date.now() + this.videoQuotaCooldownMs)
+              console.log(`[AIStudio] Worker ${workerId} 命中视频额度，冷却 ${this.videoQuotaCooldownMs / 1000}s，item ${item.id} 放回队列(第${cnt}次)`)
+              progressCallback({
+                type: 'worker', taskId, workerId, browserProfileId, status: 'cooldown',
+                message: `[${workerId}] 视频额度用尽，冷却 ${Math.round(this.videoQuotaCooldownMs / 1000)}s，任务交其它账号处理`
+              })
+            }
+            // 让出循环：由顶部冷却门负责等待
+            continue
           }
 
           // 其他错误：正常处理
@@ -966,56 +1271,23 @@ class AIStudioService {
         throw new Error('粘贴视频链接失败：未检测到视频附件')
       }
 
-      // 等待视频处理完成（Google 更新后的新选择器）
-      // 新结构：处理完成后会显示 token 数量，或者设置按钮变为可点击状态
-      try {
-        // 方法1：等待 token 数量出现（表示视频已处理完成）
-        await page.waitForSelector('ms-token-status span[data-test-id="token-count"], ms-prompt-media button[aria-label="Edit video options"]:not([disabled]), mat-icon:has-text("settings_video_camera"), span.material-symbols-outlined:has-text("settings")', {
-          state: 'visible',
-          timeout: 60000
-        })
-        console.log('[Worker] Video processing complete.')
-      } catch (e) {
-        throw new Error('视频处理超时：未检测到处理完成图标')
-      }
+      // 等待视频真正处理完成（轮询 token 数直到稳定，避免在视频就绪前就发送）
+      await this.waitForVideoProcessed(page, '[Worker]')
       await page.waitForTimeout(1000)
 
-      // Step 7.2: 输入提示词
+      // Step 7.2: 输入提示词（用 CDP Input.insertText，不走剪贴板/按键，规避自动化识别）
       progressCallback({ step: 7, progress: 60, message: '正在输入提示词...' })
-      await page.keyboard.press('Shift+Enter')
-      await page.keyboard.press('Shift+Enter')
-
       await inputElement.click()
+      await page.waitForTimeout(300)
+      await page.keyboard.press('Shift+Enter')
+      await page.keyboard.press('Shift+Enter')
+      await this.insertPromptViaCDP(page, inputElement, this.defaultPrompt, `[${workerId}]`)
       await page.waitForTimeout(500)
 
-      // 使用剪贴板锁保护粘贴操作，避免多浏览器并行时冲突
-      await clipboardLock.writeAndPaste(page, this.defaultPrompt, `worker-paste-prompt`)
-      await page.waitForTimeout(500)
-
-      // 发送 - 增强版：多重验证和重试机制
-      // 基于实际 HTML 结构优化的选择器（按优先级排序）
-      const sendSelectors = [
-        // 最精确：ms-run-button 组件内的 button
-        'ms-run-button button.run-button',
-        'ms-run-button button[aria-label="Run"]',
-        'ms-run-button button[type="submit"]',
-        // 次精确：class 和 aria-label 组合
-        'button.run-button[aria-label="Run"]',
-        'button.run-button[type="submit"]',
-        // 通用选择器
-        'button[aria-label="Run"]',
-        'button.run-button',
-        'button:has-text("Run")',
-        '[data-testid="run-button"]',
-        'button[type="submit"]:has-text("Run")'
-      ]
-
-      // Stop 按钮选择器 - 基于实际 HTML 结构优化
-      // 当 Run 按钮点击后，ms-run-button 组件内的按钮会变成 Stop 按钮
+      // 发送：真实鼠标点击 ms-run-button（不用 Ctrl+Enter——实测会被判定为自动化而 permission denied）
       const stopButtonSelectors = [
         'ms-run-button button:has-text("Stop")',
         'ms-run-button button[aria-label="Stop"]',
-        'button.run-button:has-text("Stop")',
         'button[aria-label="Stop"]',
         'button:has-text("Stop")'
       ]
@@ -1024,111 +1296,35 @@ class AIStudioService {
 
       for (let retry = 0; retry < maxRetries && !sendSuccess; retry++) {
         if (retry > 0) {
-          console.log(`[${workerId}] 发送按钮点击重试 ${retry}/${maxRetries}...`)
+          console.log(`[${workerId}] 发送重试 ${retry}/${maxRetries}...`)
           await page.waitForTimeout(1000)
         }
 
-        // 尝试点击发送按钮
-        let clicked = false
-        for (const selector of sendSelectors) {
-          try {
-            const button = await page.locator(selector).first()
-            const isVisible = await button.isVisible({ timeout: 500 })
-            if (isVisible) {
-              // 获取按钮位置信息用于调试
-              const box = await button.boundingBox()
-              console.log(`[${workerId}] 找到发送按钮: ${selector}, 位置: x=${box?.x}, y=${box?.y}, w=${box?.width}, h=${box?.height}`)
-
-              // 确保按钮在视口内
-              await button.scrollIntoViewIfNeeded()
-              await page.waitForTimeout(300)
-
-              // 检查按钮是否被禁用
-              const isDisabled = await button.getAttribute('aria-disabled')
-              if (isDisabled === 'true') {
-                console.log(`[${workerId}] ⚠ 按钮被禁用，跳过此选择器`)
-                continue
-              }
-
-              // 方法1：先尝试普通点击
-              try {
-                await button.click({ timeout: 3000 })
-                console.log(`[${workerId}] ✓ 普通点击发送按钮成功: ${selector}`)
-                clicked = true
-                break
-              } catch (clickErr) {
-                console.log(`[${workerId}] 普通点击失败，尝试强制点击...`)
-              }
-
-              // 方法2：强制点击
-              try {
-                await button.click({ force: true, timeout: 3000 })
-                console.log(`[${workerId}] ✓ 强制点击发送按钮成功: ${selector}`)
-                clicked = true
-                break
-              } catch (forceClickErr) {
-                console.log(`[${workerId}] 强制点击也失败，尝试 JavaScript 点击...`)
-              }
-
-              // 方法3：使用 JavaScript 直接点击
-              try {
-                await button.evaluate((el) => el.click())
-                console.log(`[${workerId}] ✓ JavaScript 点击发送按钮成功: ${selector}`)
-                clicked = true
-                break
-              } catch (jsClickErr) {
-                console.log(`[${workerId}] JavaScript 点击也失败: ${jsClickErr.message}`)
-              }
-            }
-          } catch (e) {
-            // 选择器未找到，继续下一个
-            continue
-          }
-        }
-
-        // 如果所有按钮点击方式都失败，使用键盘快捷键
+        const clicked = await this.clickRunButtonHuman(page, `[${workerId}]`)
         if (!clicked) {
-          console.log(`[${workerId}] 所有按钮点击方式失败，使用 Ctrl+Enter 快捷键...`)
-          try {
-            // 确保输入框有焦点
-            await inputElement.focus()
-            await page.waitForTimeout(200)
-            await page.keyboard.press('Control+Enter')
-            console.log(`[${workerId}] ✓ 已发送 Ctrl+Enter 快捷键`)
-          } catch (e) {
-            console.log(`[${workerId}] Ctrl+Enter 也失败: ${e.message}`)
-          }
+          console.log(`[${workerId}] ⚠ 未能定位发送按钮`)
         }
 
-        // 验证发送是否成功：检查 Stop 按钮是否出现（使用多个选择器）
+        // 验证发送是否成功：检查 Stop 按钮是否出现
         console.log(`[${workerId}] 等待验证发送结果...`)
         await page.waitForTimeout(2000)
         for (const stopSelector of stopButtonSelectors) {
           try {
             const stopButton = await page.locator(stopSelector).first()
-            const stopVisible = await stopButton.isVisible({ timeout: 1500 })
-            if (stopVisible) {
-              console.log(`[${workerId}] ✓ 发送成功确认：Stop 按钮已出现 (选择器: ${stopSelector})`)
+            if (await stopButton.isVisible({ timeout: 1500 })) {
+              console.log(`[${workerId}] ✓ 发送成功确认：Stop 按钮已出现`)
               sendSuccess = true
               break
             }
           } catch (e) {
-            // 继续尝试下一个选择器
             continue
           }
         }
         if (!sendSuccess) {
           console.log(`[${workerId}] ⚠ Stop 按钮未出现，可能发送失败`)
-        }
-
-        // 如果还没成功，尝试再次点击输入框确保焦点正确
-        if (!sendSuccess && retry < maxRetries - 1) {
-          console.log(`[${workerId}] 准备重试，先恢复输入框焦点...`)
-          try {
-            await inputElement.click()
-            await page.waitForTimeout(500)
-          } catch (e) {
-            // 忽略
+          // 重试前确保焦点在输入框
+          if (retry < maxRetries - 1) {
+            try { await inputElement.click(); await page.waitForTimeout(500) } catch (e) { /* 忽略 */ }
           }
         }
       }
@@ -1186,8 +1382,9 @@ class AIStudioService {
         const elapsed = Math.round((Date.now() - startTime) / 1000)
         let statusMsg = `⏱️ 等待AI回复... ${elapsed}s`
 
-        // 检查是否出现错误信息（内部错误或速率限制）
+        // 检查是否出现错误信息（内部错误 / 速率限制 / 顶部 toast 提示）
         try {
+          // 1) 模型回复区域内的错误
           const errorElement = await page.locator('.model-error, [class*="model-error"]').first()
           if (await errorElement.isVisible({ timeout: 200 })) {
             const errorText = await errorElement.textContent()
@@ -1204,9 +1401,19 @@ class AIStudioService {
               }
             }
           }
+          // 2) 右上角 toast/snackbar 提示（如 "Failed to generate content: permission denied"）
+          //    这种 toast 几秒后会自动消失，必须快速捕获，否则会白等满 3 分钟超时
+          const snack = await page.locator('mat-snack-bar-container, .mat-mdc-snack-bar-container, [class*="snack-bar"]').first()
+          if (await snack.isVisible({ timeout: 200 })) {
+            const snackText = (await snack.textContent()) || ''
+            if (/permission denied|Failed to generate|internal error/i.test(snackText)) {
+              console.log(`[${workerId}] ❌ 检测到 AI Studio 提示: ${snackText.trim()}`)
+              throw new Error('AI Studio 生成失败: ' + snackText.trim())
+            }
+          }
         } catch (e) {
-          // 如果是我们主动抛出的错误，继续抛出
-          if (e.message && (e.message.includes('AI Studio 内部错误') || e.message.includes('AI Studio 速率限制') || e.isVideoError)) {
+          // 如果是我们主动抛出的错误，继续抛出（交给上层重试逻辑）
+          if (e.message && (e.message.includes('AI Studio 内部错误') || e.message.includes('AI Studio 速率限制') || e.message.includes('AI Studio 生成失败') || e.isVideoError)) {
             throw e
           }
           // 其他错误（如元素未找到）忽略
@@ -1684,64 +1891,27 @@ class AIStudioService {
         throw new Error('粘贴视频链接失败：未检测到视频附件')
       }
 
-      // 等待视频处理完成（Google 更新后的新选择器）
-      // 新结构：处理完成后会显示 token 数量，或者设置按钮变为可点击状态
+      // 等待视频真正处理完成（轮询 token 数直到稳定，避免在视频就绪前就发送）
       console.log('Waiting for video link processing...')
-      try {
-        // 等待 token 数量出现或设置按钮可用（表示视频已处理完成）
-        await page.waitForSelector('ms-token-status span[data-test-id="token-count"], ms-prompt-media button[aria-label="Edit video options"]:not([disabled]), mat-icon:has-text("settings_video_camera"), span.material-symbols-outlined:has-text("settings")', {
-          state: 'visible',
-          timeout: 60000
-        })
-        console.log('Video link processed (token count or settings icon found)')
-      } catch (e) {
-        throw new Error('视频处理超时：未检测到处理完成图标')
-      }
+      await this.waitForVideoProcessed(page, '[Single]')
       await page.waitForTimeout(1000)
 
-      // Step 7.2: 输入提示词
+      // Step 7.2: 输入提示词（用 CDP Input.insertText，不走剪贴板/按键，规避自动化识别）
       progressCallback({ step: 7, progress: 60, message: '正在输入提示词...' })
-      console.log('Typing prompt...')
+      console.log('Inserting prompt via CDP...')
+      await inputElement.click()
+      await page.waitForTimeout(300)
       // 换行
       await page.keyboard.press('Shift+Enter')
       await page.keyboard.press('Shift+Enter')
-
-      const prompt = this.defaultPrompt
-
-      // 确保输入框有焦点
-      await inputElement.click()
-      await page.waitForTimeout(500)
-
-      // 使用剪贴板锁保护粘贴操作，避免多浏览器并行时冲突
-      console.log('Pasting prompt...')
-      await clipboardLock.writeAndPaste(page, prompt, 'paste-prompt')
+      await this.insertPromptViaCDP(page, inputElement, this.defaultPrompt, '[Single]')
       console.log('Input complete')
-
       await page.waitForTimeout(1000)
 
-      // 发送 - 增强版：多重验证和重试机制
-      // 基于实际 HTML 结构优化的选择器（按优先级排序）
-      const sendSelectors2 = [
-        // 最精确：ms-run-button 组件内的 button
-        'ms-run-button button.run-button',
-        'ms-run-button button[aria-label="Run"]',
-        'ms-run-button button[type="submit"]',
-        // 次精确：class 和 aria-label 组合
-        'button.run-button[aria-label="Run"]',
-        'button.run-button[type="submit"]',
-        // 通用选择器
-        'button[aria-label="Run"]',
-        'button.run-button',
-        'button:has-text("Run")',
-        '[data-testid="run-button"]',
-        'button[type="submit"]:has-text("Run")'
-      ]
-
-      // Stop 按钮选择器 - 基于实际 HTML 结构优化
+      // 发送：真实鼠标点击 ms-run-button（不用 Ctrl+Enter——实测会被判定为自动化而 permission denied）
       const stopButtonSelectorsSingle = [
         'ms-run-button button:has-text("Stop")',
         'ms-run-button button[aria-label="Stop"]',
-        'button.run-button:has-text("Stop")',
         'button[aria-label="Stop"]',
         'button:has-text("Stop")'
       ]
@@ -1750,111 +1920,34 @@ class AIStudioService {
 
       for (let retry = 0; retry < maxRetriesSingle && !sendSuccessSingle; retry++) {
         if (retry > 0) {
-          console.log(`[AIStudio] 发送按钮点击重试 ${retry}/${maxRetriesSingle}...`)
+          console.log(`[AIStudio] 发送重试 ${retry}/${maxRetriesSingle}...`)
           await page.waitForTimeout(1000)
         }
 
-        // 尝试点击发送按钮
-        let clicked = false
-        for (const selector of sendSelectors2) {
-          try {
-            const button = await page.locator(selector).first()
-            const isVisible = await button.isVisible({ timeout: 500 })
-            if (isVisible) {
-              // 获取按钮位置信息用于调试
-              const box = await button.boundingBox()
-              console.log(`[AIStudio] 找到发送按钮: ${selector}, 位置: x=${box?.x}, y=${box?.y}, w=${box?.width}, h=${box?.height}`)
-
-              // 确保按钮在视口内
-              await button.scrollIntoViewIfNeeded()
-              await page.waitForTimeout(300)
-
-              // 检查按钮是否被禁用
-              const isDisabled = await button.getAttribute('aria-disabled')
-              if (isDisabled === 'true') {
-                console.log('[AIStudio] ⚠ 按钮被禁用，跳过此选择器')
-                continue
-              }
-
-              // 方法1：先尝试普通点击
-              try {
-                await button.click({ timeout: 3000 })
-                console.log('[AIStudio] ✓ 普通点击发送按钮成功:', selector)
-                clicked = true
-                break
-              } catch (clickErr) {
-                console.log('[AIStudio] 普通点击失败，尝试强制点击...')
-              }
-
-              // 方法2：强制点击
-              try {
-                await button.click({ force: true, timeout: 3000 })
-                console.log('[AIStudio] ✓ 强制点击发送按钮成功:', selector)
-                clicked = true
-                break
-              } catch (forceClickErr) {
-                console.log('[AIStudio] 强制点击也失败，尝试 JavaScript 点击...')
-              }
-
-              // 方法3：使用 JavaScript 直接点击
-              try {
-                await button.evaluate((el) => el.click())
-                console.log('[AIStudio] ✓ JavaScript 点击发送按钮成功:', selector)
-                clicked = true
-                break
-              } catch (jsClickErr) {
-                console.log('[AIStudio] JavaScript 点击也失败:', jsClickErr.message)
-              }
-            }
-          } catch (e) {
-            // 选择器未找到，继续下一个
-            continue
-          }
-        }
-
-        // 如果所有按钮点击方式都失败，使用键盘快捷键
+        const clicked = await this.clickRunButtonHuman(page, '[AIStudio]')
         if (!clicked) {
-          console.log('[AIStudio] 所有按钮点击方式失败，使用 Ctrl+Enter 快捷键...')
-          try {
-            // 确保输入框有焦点
-            await inputElement.focus()
-            await page.waitForTimeout(200)
-            await page.keyboard.press('Control+Enter')
-            console.log('[AIStudio] ✓ 已发送 Ctrl+Enter 快捷键')
-          } catch (e) {
-            console.log('[AIStudio] Ctrl+Enter 也失败:', e.message)
-          }
+          console.log('[AIStudio] ⚠ 未能定位发送按钮')
         }
 
-        // 验证发送是否成功：检查 Stop 按钮是否出现（使用多个选择器）
+        // 验证发送是否成功：检查 Stop 按钮是否出现
         console.log('[AIStudio] 等待验证发送结果...')
         await page.waitForTimeout(2000)
         for (const stopSelector of stopButtonSelectorsSingle) {
           try {
             const stopButton = await page.locator(stopSelector).first()
-            const stopVisible = await stopButton.isVisible({ timeout: 1500 })
-            if (stopVisible) {
-              console.log(`[AIStudio] ✓ 发送成功确认：Stop 按钮已出现 (选择器: ${stopSelector})`)
+            if (await stopButton.isVisible({ timeout: 1500 })) {
+              console.log(`[AIStudio] ✓ 发送成功确认：Stop 按钮已出现`)
               sendSuccessSingle = true
               break
             }
           } catch (e) {
-            // 继续尝试下一个选择器
             continue
           }
         }
         if (!sendSuccessSingle) {
           console.log('[AIStudio] ⚠ Stop 按钮未出现，可能发送失败')
-        }
-
-        // 如果还没成功，尝试再次点击输入框确保焦点正确
-        if (!sendSuccessSingle && retry < maxRetriesSingle - 1) {
-          console.log('[AIStudio] 准备重试，先恢复输入框焦点...')
-          try {
-            await inputElement.click()
-            await page.waitForTimeout(500)
-          } catch (e) {
-            // 忽略
+          if (retry < maxRetriesSingle - 1) {
+            try { await inputElement.click(); await page.waitForTimeout(500) } catch (e) { /* 忽略 */ }
           }
         }
       }
@@ -1923,8 +2016,9 @@ class AIStudioService {
           const elapsed = Math.round((Date.now() - startTime) / 1000)
           let statusMsg = `⏱️ 等待AI回复... ${elapsed}s`
 
-          // 检查是否出现错误信息（内部错误或速率限制）
+          // 检查是否出现错误信息（内部错误 / 速率限制 / 顶部 toast 提示）
           try {
+            // 1) 模型回复区域内的错误
             const errorElement = await page.locator('.model-error, [class*="model-error"]').first()
             if (await errorElement.isVisible({ timeout: 200 })) {
               const errorText = await errorElement.textContent()
@@ -1941,9 +2035,18 @@ class AIStudioService {
                 }
               }
             }
+            // 2) 右上角 toast/snackbar 提示（如 "Failed to generate content: permission denied"）
+            const snack = await page.locator('mat-snack-bar-container, .mat-mdc-snack-bar-container, [class*="snack-bar"]').first()
+            if (await snack.isVisible({ timeout: 200 })) {
+              const snackText = (await snack.textContent()) || ''
+              if (/permission denied|Failed to generate|internal error/i.test(snackText)) {
+                console.log(`[AIStudio] ❌ 检测到 AI Studio 提示: ${snackText.trim()}`)
+                throw new Error('AI Studio 生成失败: ' + snackText.trim())
+              }
+            }
           } catch (e) {
-            // 如果是我们主动抛出的错误，继续抛出
-            if (e.message && (e.message.includes('AI Studio 内部错误') || e.message.includes('AI Studio 速率限制'))) {
+            // 如果是我们主动抛出的错误，继续抛出（交给上层重试逻辑）
+            if (e.message && (e.message.includes('AI Studio 内部错误') || e.message.includes('AI Studio 速率限制') || e.message.includes('AI Studio 生成失败'))) {
               throw e
             }
             // 其他错误（如元素未找到）忽略

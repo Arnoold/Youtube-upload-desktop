@@ -864,28 +864,18 @@ function setupIPC(mainWindow, services) {
       const profileIds = Array.isArray(browserProfileIds) ? browserProfileIds : [browserProfileIds]
 
       // 不等待 Promise 完成，直接返回，通过事件发送进度
-      if (profileIds.length > 1) {
-        // 多浏览器并行模式
-        aiStudioService.startParallelTask(taskId, profileIds, (progress) => {
-          mainWindow.webContents.send('aistudio:progress', progress)
-        }, taskType).catch(err => {
-          console.error('Async parallel task error:', err)
-          mainWindow.webContents.send('aistudio:progress', {
-            taskId,
-            status: 'error',
-            error: err.message,
-            message: '并行任务执行失败: ' + err.message
-          })
+      // 统一走并行路径（单浏览器=1个worker），确保"视频额度冷却+换号"逻辑对单/多浏览器都生效
+      aiStudioService.startParallelTask(taskId, profileIds, (progress) => {
+        mainWindow.webContents.send('aistudio:progress', progress)
+      }, taskType).catch(err => {
+        console.error('Async parallel task error:', err)
+        mainWindow.webContents.send('aistudio:progress', {
+          taskId,
+          status: 'error',
+          error: err.message,
+          message: '任务执行失败: ' + err.message
         })
-      } else {
-        // 单浏览器模式（兼容旧逻辑）
-        aiStudioService.startTask(taskId, profileIds[0], (progress) => {
-          mainWindow.webContents.send('aistudio:progress', progress)
-        }, taskType).catch(err => {
-          console.error('Async task error:', err)
-          mainWindow.webContents.send('aistudio:progress', { status: 'error', error: err.message })
-        })
-      }
+      })
       return { success: true, parallel: profileIds.length > 1, workerCount: profileIds.length }
     } catch (error) {
       console.error('aistudio:start-task error:', error)

@@ -293,11 +293,12 @@ class OwnChannelSchedulerService {
       this.notifyStatus({ status: 'running', step: 'query', message: '正在查询符合条件的视频...' })
 
       // 2. 查询视频（自有频道视频表）
+      const pageSize = 1000 // Supabase 单次最多返回 1000 条
       const queryOptions = {
         dateRange: [startDate.toISOString(), endDate.toISOString()],
         minViews: this.config.minViews * 10000,
         status: this.config.generationStatus || 'pending_all',
-        limit: 500,
+        limit: pageSize,
         sortBy: 'published_at',
         sortOrder: 'desc',
         tableName: 'own_videos' // 关键：指定查询自有频道视频表
@@ -305,16 +306,20 @@ class OwnChannelSchedulerService {
 
       let allVideos = []
       let page = 1
-      let hasMore = true
 
-      while (hasMore) {
+      while (true) {
         const result = await supabaseService.getVideos({ ...queryOptions, page })
-        allVideos = allVideos.concat(result.data)
+        allVideos = allVideos.concat(result.data || [])
 
-        if (result.data.length < queryOptions.limit || allVideos.length >= result.total) {
-          hasMore = false
-        } else {
-          page++
+        // 返回数量少于 pageSize，说明已经是最后一页
+        if (!result.data || result.data.length < pageSize) {
+          break
+        }
+        page++
+        // 安全限制：最多获取 5000 条
+        if (allVideos.length >= 5000) {
+          this.addLog('warning', `数据量较大，已获取前 ${allVideos.length} 条`)
+          break
         }
       }
 
@@ -346,18 +351,15 @@ class OwnChannelSchedulerService {
         status: 'pending'
       })
 
-      // 4. 添加任务项（循环添加到自有频道任务项表）
-      // 注意：own_videos 表可能没有 url 字段，需要手动构建
-      for (const video of allVideos) {
-        const videoInfo = {
-          id: video.id,  // Supabase 记录 ID，用于更新状态
-          video_id: video.video_id,
-          url: video.url || `https://www.youtube.com/watch?v=${video.video_id}`,
-          title: video.title,
-          channel_id: video.channel_id
-        }
-        dbService.addOwnChannelTaskItem(taskId, video.video_id, videoInfo)
-      }
+      // 4. 批量添加任务项（使用事务，性能更好）
+      const taskItems = allVideos.map(video => ({
+        id: video.id,  // Supabase 记录 ID，用于更新状态
+        video_id: video.video_id,
+        url: video.url || `https://www.youtube.com/watch?v=${video.video_id}`,
+        title: video.title,
+        channel_id: video.channel_id
+      }))
+      dbService.addOwnChannelTaskItems(taskId, taskItems)
 
       this.addLog('success', `任务创建成功: ${taskName} (ID: ${taskId})`)
       this.notifyStatus({ status: 'running', step: 'get_browsers', message: '正在获取可用浏览器...' })

@@ -1202,7 +1202,7 @@ class DatabaseService {
   }
 
   /**
-   * 添加自有频道任务项
+   * 添加自有频道任务项（单条）
    */
   addOwnChannelTaskItem(taskId, videoId, videoInfo) {
     const stmt = this.db.prepare(`
@@ -1217,6 +1217,30 @@ class DatabaseService {
       JSON.stringify(videoInfo || {}),
       'pending'
     )
+  }
+
+  /**
+   * 批量添加自有频道任务项（使用事务）
+   */
+  addOwnChannelTaskItems(taskId, items) {
+    const stmt = this.db.prepare(`
+      INSERT INTO own_channel_task_items (
+        task_id, video_id, video_info, status
+      ) VALUES (?, ?, ?, ?)
+    `)
+
+    const transaction = this.db.transaction((items) => {
+      for (const item of items) {
+        stmt.run(
+          taskId,
+          item.video_id || item.id,
+          JSON.stringify(item),
+          'pending'
+        )
+      }
+    })
+
+    return transaction(items)
   }
 
   /**

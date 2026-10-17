@@ -294,27 +294,32 @@ class SchedulerService {
 
       // 2. 查询视频
       // pending_all 表示查询 null 和 pending 两种状态
+      const pageSize = 1000 // Supabase 单次最多返回 1000 条
       const queryOptions = {
         dateRange: [startDate.toISOString(), endDate.toISOString()],
         minViews: this.config.minViews * 10000,
         status: this.config.generationStatus || 'pending_all',
-        limit: 500,
+        limit: pageSize,
         sortBy: 'published_at',
         sortOrder: 'desc'
       }
 
       let allVideos = []
       let page = 1
-      let hasMore = true
 
-      while (hasMore) {
+      while (true) {
         const result = await supabaseService.getVideos({ ...queryOptions, page })
-        allVideos = allVideos.concat(result.data)
+        allVideos = allVideos.concat(result.data || [])
 
-        if (result.data.length < queryOptions.limit || allVideos.length >= result.total) {
-          hasMore = false
-        } else {
-          page++
+        // 返回数量少于 pageSize，说明已经是最后一页
+        if (!result.data || result.data.length < pageSize) {
+          break
+        }
+        page++
+        // 安全限制：最多获取 5000 条
+        if (allVideos.length >= 5000) {
+          this.addLog('warning', `数据量较大，已获取前 ${allVideos.length} 条`)
+          break
         }
       }
 
