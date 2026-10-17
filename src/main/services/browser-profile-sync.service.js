@@ -36,6 +36,28 @@ class BrowserProfileSyncService {
         query = query.eq('source', options.source)
       }
 
+      // 账号状态：页面上把空值当「闲置」显示，筛闲置时要连空值一起查
+      if (options.accountStatus === 'idle') {
+        query = query.or('account_status.eq.idle,account_status.is.null')
+      } else if (options.accountStatus) {
+        query = query.eq('account_status', options.accountStatus)
+      }
+
+      // Google 状态：'none' 表示还没检测过
+      if (options.googleStatus === 'none') {
+        query = query.is('google_status', null)
+      } else if (options.googleStatus) {
+        query = query.eq('google_status', options.googleStatus)
+      }
+
+      // 关键词：纯数字按序号精确查，否则按名称模糊查
+      const keyword = (options.keyword || '').trim()
+      if (/^\d+$/.test(keyword)) {
+        query = query.eq('seq', Number(keyword))
+      } else if (keyword) {
+        query = query.ilike('profile_name', `%${keyword}%`)
+      }
+
       return query
         .order('id', { ascending: false })
         .range(offset, offset + pageSize - 1)

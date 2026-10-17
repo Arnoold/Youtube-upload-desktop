@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { Typography, Button, message, Table, Space, Tag, Tooltip } from 'antd'
+import { Typography, Button, message, Table, Space, Tag, Tooltip, Select, Input } from 'antd'
 import { SyncOutlined, ReloadOutlined, ThunderboltOutlined } from '@ant-design/icons'
 
 const { Title, Text } = Typography
@@ -10,11 +10,12 @@ const BrowserProfilesPage = () => {
   const [syncing, setSyncing] = useState(null) // 'hubstudio' | 'bitbrowser' | null
   const [fetchingId, setFetchingId] = useState(null) // 正在采集用量的 profile id
   const [pagination, setPagination] = useState({ current: 1, pageSize: 50, total: 0 })
+  const [filters, setFilters] = useState({ source: undefined, accountStatus: undefined, googleStatus: undefined, keyword: '' })
 
   const loadProfiles = useCallback(async (page = 1, pageSize = 50) => {
     setLoading(true)
     try {
-      const result = await window.electron.browserProfiles.list({ page, pageSize })
+      const result = await window.electron.browserProfiles.list({ page, pageSize, ...filters })
       if (result.error) {
         message.error(result.error)
         return
@@ -31,11 +32,14 @@ const BrowserProfilesPage = () => {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [filters])
 
+  // 首次加载 + 筛选条件变化时回到第 1 页
   useEffect(() => {
-    loadProfiles()
+    loadProfiles(1, pagination.pageSize)
   }, [loadProfiles])
+
+  const updateFilter = (key, value) => setFilters(prev => ({ ...prev, [key]: value }))
 
   const handleSyncHubStudio = async () => {
     setSyncing('hubstudio')
@@ -320,6 +324,45 @@ const BrowserProfilesPage = () => {
           </Button>
         </Space>
       </div>
+
+      <Space wrap style={{ marginBottom: 16 }}>
+        <Select
+          placeholder="来源"
+          allowClear
+          style={{ width: 130 }}
+          value={filters.source}
+          onChange={(v) => updateFilter('source', v)}
+          options={[
+            { value: 'bitbrowser', label: 'BitBrowser' },
+            { value: 'hubstudio', label: 'HubStudio' }
+          ]}
+        />
+        <Select
+          placeholder="账号状态"
+          allowClear
+          style={{ width: 120 }}
+          value={filters.accountStatus}
+          onChange={(v) => updateFilter('accountStatus', v)}
+          options={ACCOUNT_STATUS_OPTIONS.map(o => ({ value: o.value, label: o.label }))}
+        />
+        <Select
+          placeholder="Google状态"
+          allowClear
+          style={{ width: 130 }}
+          value={filters.googleStatus}
+          onChange={(v) => updateFilter('googleStatus', v)}
+          options={[
+            ...Object.entries(GOOGLE_STATUS_MAP).map(([value, o]) => ({ value, label: o.label })),
+            { value: 'none', label: '未检测' }
+          ]}
+        />
+        <Input.Search
+          placeholder="名称 / 序号"
+          allowClear
+          style={{ width: 200 }}
+          onSearch={(v) => updateFilter('keyword', v)}
+        />
+      </Space>
 
       <Table
         columns={columns}
