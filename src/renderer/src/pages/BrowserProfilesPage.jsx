@@ -112,6 +112,13 @@ const BrowserProfilesPage = () => {
     unknown: { label: '未知', color: 'default' }
   }
 
+  // collectable: 能否采集（必得D 不采集）
+  const SOURCE_OPTIONS = [
+    { value: 'bitbrowser', label: 'BitBrowser', color: 'blue', collectable: true },
+    { value: 'hubstudio', label: 'HubStudio', color: 'green', collectable: true },
+    { value: 'bide', label: '必得D', color: 'purple', collectable: false }
+  ]
+
   const ACCOUNT_STATUS_OPTIONS = [
     { value: 'active', label: '使用中', color: 'success' },
     { value: 'banned', label: '封禁', color: 'error' },
@@ -140,9 +147,8 @@ const BrowserProfilesPage = () => {
       dataIndex: 'source',
       width: 100,
       render: (source) => {
-        const color = source === 'hubstudio' ? 'green' : 'blue'
-        const label = source === 'hubstudio' ? 'HubStudio' : 'BitBrowser'
-        return <Tag color={color}>{label}</Tag>
+        const opt = SOURCE_OPTIONS.find(o => o.value === source)
+        return <Tag color={opt?.color || 'default'}>{opt?.label || source}</Tag>
       }
     },
     {
@@ -277,7 +283,9 @@ const BrowserProfilesPage = () => {
       key: 'action',
       width: 100,
       fixed: 'right',
-      render: (_, record) => (
+      render: (_, record) => !SOURCE_OPTIONS.find(o => o.value === record.source)?.collectable ? (
+        <Text type="secondary">不采集</Text>
+      ) : (
         <Button
           type="link"
           size="small"
@@ -332,10 +340,7 @@ const BrowserProfilesPage = () => {
           style={{ width: 130 }}
           value={filters.source}
           onChange={(v) => updateFilter('source', v)}
-          options={[
-            { value: 'bitbrowser', label: 'BitBrowser' },
-            { value: 'hubstudio', label: 'HubStudio' }
-          ]}
+          options={SOURCE_OPTIONS.map(o => ({ value: o.value, label: o.label }))}
         />
         <Select
           placeholder="账号状态"

@@ -20,6 +20,9 @@ const GOOGLE_TIMEOUT = 40000
 // 单个账号采集的总时长上限：超过就放弃这个号，关掉浏览器直接跑下一个
 const PROFILE_TIMEOUT = 150000 + GOOGLE_TIMEOUT
 
+// 能启动并采集的浏览器来源；必得D（bide）等其他来源一律跳过
+const COLLECTABLE_SOURCES = ['bitbrowser', 'hubstudio']
+
 // 检测 Google 账号状态用的页面
 const GOOGLE_MYACCOUNT_URL = 'https://myaccount.google.com/'
 // 账号被停用的页面文案（中英文都可能出现，取决于浏览器语言）
@@ -182,6 +185,7 @@ class ClaudeUsageService {
         .from('browser_profiles')
         .select('id, source, profile_id, profile_name, seq')
         .eq('account_status', 'active')
+        .in('source', COLLECTABLE_SOURCES)
         .order('id', { ascending: true })
 
       if (error) throw new Error('查询浏览器配置失败: ' + error.message)
@@ -924,6 +928,10 @@ class ClaudeUsageService {
 
       if (error || !data) {
         return { success: false, error: '未找到浏览器配置', logs }
+      }
+
+      if (!COLLECTABLE_SOURCES.includes(data.source)) {
+        return { success: false, error: `${data.source === 'bide' ? '必得D' : data.source} 浏览器不采集，已跳过`, logs }
       }
 
       await this._fetchOne(data, {
