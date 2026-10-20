@@ -490,7 +490,8 @@ class ClaudeUsageService {
       result.email = (bodyText.match(/[\w.+-]+@[\w-]+(\.[\w-]+)+/) || [])[0] || null
     } catch (e) {
       result.status = 'unknown'
-      result.detail = e.message
+      // Playwright 报错后面会跟一大段 Call log，只留第一行就够看出原因
+      result.detail = (e.message || '').split('\n')[0]
     } finally {
       if (page) {
         try { await page.close() } catch (e) { /* 忽略 */ }
@@ -546,6 +547,9 @@ class ClaudeUsageService {
       // 未登录时个人中心会落到介绍页
       return /^\/intro/.test(path) ? 'logged_out' : 'normal'
     }
+
+    // 浏览器里完全没有 Google 账号时，个人中心会跳到 google.com/account/about 介绍页
+    if (/^(www\.)?google\.com$/.test(u.hostname) && /^\/account\/about/.test(path)) return 'logged_out'
 
     if (u.hostname === 'accounts.google.com') {
       // 记住了账号但会话过期，只要求重新输密码 —— 算掉登录
